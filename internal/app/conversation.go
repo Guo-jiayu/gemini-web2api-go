@@ -374,8 +374,10 @@ func streamGenerateConv(prompt string, mc ModelConfig, conv *convState,
 
 	t0 := time.Now()
 	var lastErr error
-	for attempt := 0; attempt < rtCfg().RetryAttempts; attempt++ {
-		statusCode, raw, ttfb, setCookie, err := doGeminiRequest(endpoint, body, geminiHeaders, proxyURL, lineCB)
+	attemptLimit := rtCfg().RetryAttempts
+	firstWait := firstOutputWait(mc)
+	for attempt := 0; attempt < attemptLimit; attempt++ {
+		statusCode, raw, ttfb, setCookie, err := doGeminiRequest(endpoint, body, geminiHeaders, proxyURL, lineCB, firstWait)
 		if len(setCookie) > 0 && conv.cookie != "" {
 			if merged := mergeSetCookie(conv.cookie, setCookie); merged != conv.cookie {
 				conv.cookie = merged
@@ -397,15 +399,15 @@ func streamGenerateConv(prompt string, mc ModelConfig, conv *convState,
 				lastErr = fmt.Errorf("upstream HTTP %d: %s", statusCode, truncate(string(raw), 160))
 			}
 			// 出错话术跟出口无关，不记进代理健康度
-			if pickedOK && !errors.Is(err, errUpstreamFailureReply) {
+			if pickedOK && !errors.Is(err, errUpstreamFailureReply) && !errors.Is(err, errFirstOutputTimeout) {
 				recordProxyResult(p.ID, false, lastErr.Error())
 			}
 			if tracker.emitted != "" || rtracker.emitted != "" {
 				break
 			}
-			if attempt < rtCfg().RetryAttempts-1 {
+			if attempt < attemptLimit-1 {
 				if errors.Is(err, errUpstreamFailureReply) {
-					logf("retry %d/%d: %v", attempt+1, rtCfg().RetryAttempts, err)
+					logf("retry %d/%d: %v", attempt+1, attemptLimit-1, err)
 				}
 				time.Sleep(time.Duration(rtCfg().RetryDelaySec) * time.Second)
 			}
@@ -417,8 +419,8 @@ func streamGenerateConv(prompt string, mc ModelConfig, conv *convState,
 			if tracker.emitted != "" || rtracker.emitted != "" {
 				break
 			}
-			if attempt < rtCfg().RetryAttempts-1 {
-				logf("retry %d/%d: %v", attempt+1, rtCfg().RetryAttempts, lastErr)
+			if attempt < attemptLimit-1 {
+				logf("retry %d/%d: %v", attempt+1, attemptLimit-1, lastErr)
 				time.Sleep(time.Duration(rtCfg().RetryDelaySec) * time.Second)
 			}
 			continue

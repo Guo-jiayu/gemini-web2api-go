@@ -1017,9 +1017,11 @@ const RT_GROUPS = [
   {
     title: '重试与超时',
     fields: [
-      { k: 'retry_attempts', label: '重试次数', type: 'int', min: 1, max: 10,
-        hint: '含首次；流式已吐字后不再重试' },
+      { k: 'retry_attempts', label: '总尝试次数', type: 'int', min: 1, max: 10,
+        hint: '含首次：4 表示首次 + 3 次重试；流式已输出正文或思考后不再重试' },
       { k: 'retry_delay_sec', label: '重试间隔（秒）', type: 'int', min: 0, max: 60 },
+      { k: 'first_output_timeout_sec', label: '文本首个输出超时（秒）', type: 'int', min: 0, max: 600,
+        hint: '每次文本生成等待正文或思考的时限；默认 15，0=关闭。收到内容后继续完成；图片生成不受此项限制' },
       { k: 'request_timeout_sec', label: '上游超时（秒）', type: 'int', min: 5, max: 600 },
     ],
   },

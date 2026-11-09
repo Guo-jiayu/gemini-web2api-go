@@ -3,6 +3,7 @@ package app
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -822,7 +823,9 @@ func streamGenerateOnce(prompt, latest string, mc ModelConfig, pending []pending
 	}
 	serverTokenRetried := false
 	prepMs = time.Since(t0).Milliseconds()
-	for attempt := 0; attempt < rtCfg().RetryAttempts; attempt++ {
+	attemptLimit := rtCfg().RetryAttempts
+	firstWait := firstOutputWait(mc)
+	for attempt := 0; attempt < attemptLimit; attempt++ {
 		attempts++
 		attemptStart := time.Now()
 		var statusCode int
@@ -832,9 +835,9 @@ func streamGenerateOnce(prompt, latest string, mc ModelConfig, pending []pending
 		var err error
 		if useWC {
 			wcReq.Cookie = cookieStr
-			statusCode, raw, ttfb, setCookie, err = doWebChannelRequest(wcReq, proxyURL, lineCB)
+			statusCode, raw, ttfb, setCookie, err = doWebChannelRequest(wcReq, proxyURL, lineCB, firstWait)
 		} else {
-			statusCode, raw, ttfb, setCookie, err = doGeminiRequest(endpoint, body, geminiHeaders, proxyURL, lineCB)
+			statusCode, raw, ttfb, setCookie, err = doGeminiRequest(endpoint, body, geminiHeaders, proxyURL, lineCB, firstWait)
 		}
 		if rtCfg().LogRequests {
 			logf("[latency] trace=%s attempt=%d web_channel=%t browser_auth=%t status=%d upstream_first_line_ms=%d attempt_ms=%d transport_error=%t reported=%q",
@@ -872,15 +875,15 @@ func streamGenerateOnce(prompt, latest string, mc ModelConfig, pending []pending
 		if err != nil {
 			lastErr = err
 			// 出错话术不记进代理健康度：匿名直连也一样出，跟出口无关，算进去会误熔断。
-			if pickedOK && !errors.Is(err, errUpstreamFailureReply) {
+			if pickedOK && !errors.Is(err, errUpstreamFailureReply) && !errors.Is(err, errFirstOutputTimeout) {
 				recordProxyResult(picked.ID, false, err.Error())
 			}
 			// 已经往客户端吐过内容就不能重试，否则会重复（思考链也算吐过）。
 			if tracker.emitted != "" || rtracker.emitted != "" {
 				break
 			}
-			if attempt < rtCfg().RetryAttempts-1 {
-				logf("retry %d/%d: %v", attempt+1, rtCfg().RetryAttempts, err)
+			if attempt < attemptLimit-1 {
+				logf("retry %d/%d: %v", attempt+1, attemptLimit-1, err)
 				time.Sleep(time.Duration(rtCfg().RetryDelaySec) * time.Second)
 			}
 			continue
@@ -909,7 +912,7 @@ func streamGenerateOnce(prompt, latest string, mc ModelConfig, pending []pending
 			if tracker.emitted != "" || rtracker.emitted != "" {
 				break
 			}
-			if attempt < rtCfg().RetryAttempts-1 {
+			if attempt < attemptLimit-1 {
 				time.Sleep(time.Duration(rtCfg().RetryDelaySec) * time.Second)
 			}
 			continue
@@ -936,8 +939,8 @@ func streamGenerateOnce(prompt, latest string, mc ModelConfig, pending []pending
 			if tracker.emitted != "" || rtracker.emitted != "" {
 				break
 			}
-			if attempt < rtCfg().RetryAttempts-1 {
-				logf("retry %d/%d: 空响应（无内容帧，%d 字节）", attempt+1, rtCfg().RetryAttempts, len(raw))
+			if attempt < attemptLimit-1 {
+				logf("retry %d/%d: 空响应（无内容帧，%d 字节）", attempt+1, attemptLimit-1, len(raw))
 				time.Sleep(time.Duration(rtCfg().RetryDelaySec) * time.Second)
 			}
 			continue
@@ -948,8 +951,8 @@ func streamGenerateOnce(prompt, latest string, mc ModelConfig, pending []pending
 			if tracker.emitted != "" || rtracker.emitted != "" {
 				break
 			}
-			if attempt < rtCfg().RetryAttempts-1 {
-				logf("retry %d/%d: %v", attempt+1, rtCfg().RetryAttempts, lastErr)
+			if attempt < attemptLimit-1 {
+				logf("retry %d/%d: %v", attempt+1, attemptLimit-1, lastErr)
 				time.Sleep(time.Duration(rtCfg().RetryDelaySec) * time.Second)
 			}
 			continue
@@ -1095,11 +1098,22 @@ func setAuthUserHeaders(h map[string]string, authuser int) {
 // __Secure-3PSIDCC，浏览器收下再带回去。一直发旧值的客户端会被判定为过期会话，
 // 实测号活一两小时就失效 —— 所以这些必须收下来并写回账号。
 func doGeminiRequest(endpoint, body string, headers map[string]string, proxyURL string,
-	onLine func(string) error) (int, []byte, int64, []string, error) {
+	onLine func(string) error, firstWait ...time.Duration) (status int, raw []byte, ttfb int64, cookies []string, resultErr error) {
+	var wait time.Duration
+	if len(firstWait) > 0 {
+		wait = firstWait[0]
+	}
+	ctx, onLine, cleanup := firstOutputGuard(context.Background(), wait, onLine)
+	defer cleanup()
+	defer func() {
+		if errors.Is(context.Cause(ctx), errFirstOutputTimeout) {
+			resultErr = context.Cause(ctx)
+		}
+	}()
 	sendAt := time.Now()
 	if proxyURL != "" {
 		// 走 stdlib 的 http.ProxyURL，已知能过 socks5/socks5h。
-		req, err := http.NewRequest("POST", endpoint, strings.NewReader(body))
+		req, err := http.NewRequestWithContext(ctx, "POST", endpoint, strings.NewReader(body))
 		if err != nil {
 			return 0, nil, 0, nil, err
 		}
@@ -1121,7 +1135,7 @@ func doGeminiRequest(endpoint, body string, headers map[string]string, proxyURL 
 	}
 
 	// 直连 → tls-client，保留 chrome146 TLS/HTTP2 真指纹
-	req, err := fhttp.NewRequest("POST", endpoint, strings.NewReader(body))
+	req, err := fhttp.NewRequestWithContext(ctx, "POST", endpoint, strings.NewReader(body))
 	if err != nil {
 		return 0, nil, 0, nil, err
 	}
@@ -1134,7 +1148,7 @@ func doGeminiRequest(endpoint, body string, headers map[string]string, proxyURL 
 		return 0, nil, 0, nil, err
 	}
 	defer resp.Body.Close()
-	raw, ttfb, err := readBody(resp.Body, onLine, sendAt)
+	raw, ttfb, err = readBody(resp.Body, onLine, sendAt)
 	if err != nil {
 		return resp.StatusCode, raw, ttfb, resp.Header.Values("Set-Cookie"), err
 	}

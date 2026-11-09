@@ -7,21 +7,22 @@ import (
 )
 
 type Config struct {
-	Port           int    `json:"port"`
-	Host           string `json:"host"`
-	RetryAttempts  int    `json:"retry_attempts"`
-	RetryDelaySec  int    `json:"retry_delay_sec"`
-	RequestTimeout int    `json:"request_timeout_sec"`
-	GeminiBL       string `json:"gemini_bl"`
-	DefaultModel   string `json:"default_model"`
-	LogRequests    bool   `json:"log_requests"`
-	CookieFile     string `json:"cookie_file"`
-	Proxy          string `json:"proxy"` // 只用于启动时播种代理池，见 seedProxiesFromConfig
-	Impersonate    string `json:"impersonate"`
-	DBPath         string `json:"db_path"`
-	AdminToken     string `json:"admin_token"`
-	AdminEnabled   bool   `json:"admin_enabled"`
-	RetentionDays  int    `json:"retention_days"`
+	FirstOutputTimeout int    `json:"first_output_timeout_sec"`
+	Port               int    `json:"port"`
+	Host               string `json:"host"`
+	RetryAttempts      int    `json:"retry_attempts"`
+	RetryDelaySec      int    `json:"retry_delay_sec"`
+	RequestTimeout     int    `json:"request_timeout_sec"`
+	GeminiBL           string `json:"gemini_bl"`
+	DefaultModel       string `json:"default_model"`
+	LogRequests        bool   `json:"log_requests"`
+	CookieFile         string `json:"cookie_file"`
+	Proxy              string `json:"proxy"` // 只用于启动时播种代理池，见 seedProxiesFromConfig
+	Impersonate        string `json:"impersonate"`
+	DBPath             string `json:"db_path"`
+	AdminToken         string `json:"admin_token"`
+	AdminEnabled       bool   `json:"admin_enabled"`
+	RetentionDays      int    `json:"retention_days"`
 
 	// Per-IP rate limit (一个 slot = 直连/或一个代理),0 表示不限。
 	// 默认值取实测区间 80-180 的下沿，详见 ratelimit.go 的说明。
@@ -80,21 +81,22 @@ var (
 
 func defaultConfig() Config {
 	return Config{
-		Port:           8083,
-		Host:           "0.0.0.0",
-		RetryAttempts:  3,
-		RetryDelaySec:  2,
-		RequestTimeout: 180,
-		GeminiBL:       "boq_gemini-web-uiserver_20261007.01_p0",
-		DefaultModel:   "gemini-3.6-flash",
-		LogRequests:    true,
-		CookieFile:     "",
-		Proxy:          "",
-		Impersonate:    "chrome_146",
-		DBPath:         "./data/gemini.db",
-		AdminToken:     "",
-		AdminEnabled:   true,
-		RetentionDays:  30,
+		Port:               8083,
+		Host:               "0.0.0.0",
+		RetryAttempts:      4,
+		FirstOutputTimeout: 15,
+		RetryDelaySec:      2,
+		RequestTimeout:     180,
+		GeminiBL:           "boq_gemini-web-uiserver_20261007.01_p0",
+		DefaultModel:       "gemini-3.6-flash",
+		LogRequests:        true,
+		CookieFile:         "",
+		Proxy:              "",
+		Impersonate:        "chrome_146",
+		DBPath:             "./data/gemini.db",
+		AdminToken:         "",
+		AdminEnabled:       true,
+		RetentionDays:      30,
 		// 单出口实测 80-180 次不等（连接策略和出口质量决定），静态 IP 上 188。
 		// RPH 取下沿 80 保守留量；按低速率跑的部署可以调高很多 ——
 		// 10 次/分钟连打 800 次、跨 110 分钟一次没被拦。

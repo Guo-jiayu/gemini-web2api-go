@@ -466,7 +466,21 @@ func wcParseStatus(p json.RawMessage) *wcStatusError {
 // doWebChannelRequest 走新协议发一次请求，返回值跟 doGeminiRequest 对齐：
 // (HTTP 状态, 老格式的 raw, TTFB 毫秒, Set-Cookie, err)。下行错误按 wcStatusError.httpStatus
 // 映射成状态码，body 是错误文本，让上层的重试和 cookie 健康度逻辑原样生效。
-func doWebChannelRequest(r wcRequest, proxyURL string, onLine func(string) error) (int, []byte, int64, []string, error) {
+func doWebChannelRequest(r wcRequest, proxyURL string, onLine func(string) error, firstWait ...time.Duration) (int, []byte, int64, []string, error) {
+	var wait time.Duration
+	if len(firstWait) > 0 {
+		wait = firstWait[0]
+	}
+	ctx, line, cleanup := firstOutputGuard(context.Background(), wait, onLine)
+	defer cleanup()
+	status, raw, ttfb, cookies, err := doWebChannelRequestContext(ctx, r, proxyURL, line)
+	if errors.Is(context.Cause(ctx), errFirstOutputTimeout) {
+		err = context.Cause(ctx)
+	}
+	return status, raw, ttfb, cookies, err
+}
+
+func doWebChannelRequestContext(parent context.Context, r wcRequest, proxyURL string, onLine func(string) error) (int, []byte, int64, []string, error) {
 	sendAt := time.Now()
 	if r.ServerToken != "" {
 		r.Inner = wcBrowserTextInner(r.Inner)
@@ -483,7 +497,7 @@ func doWebChannelRequest(r wcRequest, proxyURL string, onLine func(string) error
 	if timeout <= 0 {
 		timeout = 300 * time.Second
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 
 	var setCookie []string
