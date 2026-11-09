@@ -1039,7 +1039,9 @@ const RT_GROUPS = [
       { k: 'gemini_bl_auto', label: '自动跟随 bl 版本', type: 'bool',
         hint: '每 6 小时从 /app 页面抓一次最新版本号，抓到就用抓到的。抓不到或格式不对就继续用上面钉的值' },
       { k: 'web_channel', label: '新协议（processSession）', type: 'bool',
-        hint: '对话改走网页新版用的 processSession（WebChannel）接口，而不是老的 StreamGenerate。后端是同一个，只换传输方式；老接口目前仍正常，老接口出问题时再打开。多轮续接仍走老接口；扩展思考在新协议上暂时不生效（回报普通档）。默认关' },
+        hint: '文本及媒体都改走 processSession（WebChannel）。仅优化文本时使用下方开关。模型与思考档位参数照常发送；上游回报基础名称不代表档位行为已经得到验证。默认关' },
+      { k: 'text_web_channel', label: '仅文本使用网页通道', type: 'bool',
+        hint: '新建文本对话使用网页通道及当前账号的网页会话令牌；图片、音乐、视频生成和原生多轮续接保持原通道。令牌按账号、账号序号及出口隔离缓存。严格模型校验仍生效，实际模型不符时不会冒充成功。默认关' },
     ],
   },
   {

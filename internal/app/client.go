@@ -123,8 +123,10 @@ func getStdlibClient(proxyURL string) *http.Client {
 		MaxIdleConnsPerHost: 20,
 		IdleConnTimeout:     90 * time.Second,
 		DisableCompression:  false,
-		// 走代理时不强求 HTTP/2，部分代理不支持。
-		ForceAttemptHTTP2: false,
+		// CONNECT/SOCKS only tunnel bytes; HTTP/2 is negotiated end-to-end
+		// with Google, not with the proxy. Allow multiplexing like the browser.
+		// ALPN still falls back to HTTP/1.1 when the origin does not offer h2.
+		ForceAttemptHTTP2: true,
 	}
 	if u, err := url.Parse(proxyURL); err == nil {
 		t.Proxy = http.ProxyURL(u)
@@ -137,8 +139,10 @@ func getStdlibClient(proxyURL string) *http.Client {
 			return http.ErrUseLastResponse
 		},
 	}
-	stdlibClientCache.Store(key, c)
-	return c
+	// Concurrent first requests for the same egress must share one connection
+	// pool. Creating clients outside the map lock is cheap; publish only one.
+	actual, _ := stdlibClientCache.LoadOrStore(key, c)
+	return actual.(*http.Client)
 }
 
 // loadCookie reads the cookie file (Netscape one-line format or JSON).

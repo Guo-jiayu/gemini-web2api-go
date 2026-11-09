@@ -58,6 +58,9 @@ type Config struct {
 	// 新协议（#43）：对话改走 processSession（WebChannel）而不是老的 StreamGenerate。后端是同一个，
 	// 只换传输层；老端点还能用，默认 false。多轮续接仍走老端点，见 webchannel.go。
 	WebChannel bool `json:"web_channel"`
+	// TextWebChannel only routes new text/vision conversations through the browser
+	// transport; media generation and native conversation continuation keep their path.
+	TextWebChannel bool `json:"text_web_channel"`
 	// FirefoxFingerprint 是「浏览器指纹」实验开关（#40 之上）：开 → 强制走 Firefox/Zen 指纹
 	// （TLS profile Firefox_147 + Firefox UA + 去掉 Chromium 专有的 Sec-CH-UA）；关 → 用
 	// Impersonate（默认 Chrome）。直连才是完整 Firefox 指纹，走代理时 TLS 这层仍是 Go 标准库

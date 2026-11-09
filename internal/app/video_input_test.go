@@ -13,7 +13,7 @@ import (
 )
 
 // 1x1 PNG
-var tinyPNG, _ = base64.StdEncoding.DecodeString("iVBORw0KGRgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+var tinyPNG, _ = base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGBgAAAABQABpfZFQAAAAABJRU5ErkJggg==")
 
 func TestInputReferenceSrc(t *testing.T) {
 	cases := map[string]any{

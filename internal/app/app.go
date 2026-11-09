@@ -82,6 +82,7 @@ func Run() {
 	resolvedAPIKey := initAPIKey(*apiKey)
 	initTokenizer()
 	startScheduler()
+	go warmEnabledAppTokens()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/models", requireAPIKey(func(w http.ResponseWriter, r *http.Request) {
@@ -114,6 +115,8 @@ func Run() {
 			writeJSON(w, 405, map[string]string{"error": "method not allowed"})
 		}
 	}))
+	mux.HandleFunc("/v1/images/generations", requireAPIKey(handleImages))
+	mux.HandleFunc("/v1/images/edits", requireAPIKey(handleImages))
 	// /v1/videos —— OpenAI(Sora) 形状的异步视频生成。POST 建任务，GET 轮询，GET .../content 下 MP4。
 	mux.HandleFunc("/v1/videos", requireAPIKey(handleCreateVideo))
 	mux.HandleFunc("/v1/videos/", requireAPIKey(handleVideoItem))

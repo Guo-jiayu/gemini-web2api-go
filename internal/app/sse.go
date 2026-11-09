@@ -34,7 +34,7 @@ func (s *sseWriter) start() {
 	}
 	s.started = true
 	s.w.Header().Set("Content-Type", "text/event-stream")
-	s.w.Header().Set("Cache-Control", "no-cache")
+	s.w.Header().Set("Cache-Control", "no-cache, no-transform")
 	s.w.Header().Set("Connection", "keep-alive")
 	// 关掉反代（nginx 等）对 SSE 的整体缓冲：不发这个头，客户端直连能看到流式，
 	// 但一旦经过反代就会被攒成一坨一次性下发（Dify 那种接法就是这么变非流式的）。
@@ -44,7 +44,7 @@ func (s *sseWriter) start() {
 	s.chunk(map[string]interface{}{"role": "assistant"}, nil, nil)
 }
 
-func (s *sseWriter) chunk(delta map[string]interface{}, finish interface{}, usage map[string]int) {
+func (s *sseWriter) chunk(delta map[string]interface{}, finish interface{}, usage map[string]any) {
 	c := map[string]interface{}{
 		"id":      s.id,
 		"object":  "chat.completion.chunk",
@@ -105,7 +105,7 @@ func (s *sseWriter) SendToolCalls(tcs []ToolCall) {
 }
 
 // Finish 收尾：空 delta + finish_reason，可选 usage chunk，最后 [DONE]。
-func (s *sseWriter) Finish(reason string, usage map[string]int) {
+func (s *sseWriter) Finish(reason string, usage map[string]any) {
 	s.start()
 	s.chunk(map[string]interface{}{}, reason, nil)
 	if usage != nil {

@@ -1,0 +1,18 @@
+{
+  "host": "0.0.0.0",
+  "port": 8083,
+  "db_path": "/data/gemini.db",
+  "admin_enabled": true,
+  "default_model": "gemini-3.6-flash",
+  "strict_model": true,
+  "web_channel": false,
+  "retry_attempts": 2,
+  "retry_delay_sec": 0,
+  "request_timeout_sec": 180,
+  "log_requests": true,
+  "gemini_bl_auto": true,
+  "anon_first": false,
+  "fallback_anon": false,
+  "fallback_direct": false,
+  "text_web_channel": true
+}

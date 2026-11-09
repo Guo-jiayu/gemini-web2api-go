@@ -85,6 +85,8 @@ type ModelConfig struct {
 	Upstream string
 	// VideoAspect is the inner[55] aspect code for video: 16 = 16:9 (default), 17 = 9:16.
 	VideoAspect int
+	// Image contains request-scoped output options; Models entries stay immutable.
+	Image ImageOptions
 	// PinAccountID forces the request onto one cookie-pool account (no fallback to
 	// others). Required to continue a conversation, which lives in that account.
 	PinAccountID int64
@@ -187,6 +189,10 @@ func anonFirstEligible(mc ModelConfig, hasAttachment bool) bool {
 // 发 inner[45] 是没验过的无谓偏离。
 func temporaryChatEligible() bool {
 	return rtCfg().TemporaryChat && !rtCfg().MultiTurn
+}
+
+func useWebChannelForModel(c RuntimeConfig, mc ModelConfig) bool {
+	return c.WebChannel || (c.TextWebChannel && mc.Tool == 0 && mc.Cont == nil)
 }
 
 // availableModels 返回当前配置下值得暴露的模型。
@@ -392,7 +398,20 @@ type fileRef struct {
 // 附件填 inner[0][3]，形状 [[[ref, 1], "文件名"], …]。附件只在登录态可用：
 // 匿名能把文件传上去，但对话里一引用就被服务端回 1100。
 func streamGenerateWithFiles(prompt, latest string, mc ModelConfig, pending []pendingUpload,
-	onDelta, onReasoning func(string)) (*StreamResult, error) {
+	onDelta, onReasoning func(string)) (result *StreamResult, finalErr error) {
+	if mc.Tool == toolImage {
+		suffix := mc.Image.promptSuffix()
+		prompt += suffix
+		if latest != "" {
+			latest += suffix
+		}
+	}
+	start := time.Now()
+	defer func() {
+		if result != nil {
+			result.TotalMs = time.Since(start).Milliseconds()
+		}
+	}()
 	// strict_model 换号：被降级的号记冷却、本次排除，换下一个号重来。上限跟 XSRF 换号
 	// 一样是 maxCookieTries——连着几个号都降级，说明池子整体见底，不是撞上个别号。
 	exclude := map[int64]bool{}
@@ -419,6 +438,17 @@ func streamGenerateWithFiles(prompt, latest string, mc ModelConfig, pending []pe
 
 func streamGenerateOnce(prompt, latest string, mc ModelConfig, pending []pendingUpload,
 	onDelta, onReasoning func(string), exclude map[int64]bool) (*StreamResult, error) {
+	t0 := time.Now()
+	traceID := randHex(6)
+	var prepMs, xsrfMs int64
+	firstTextMs, firstReasoningMs := int64(-1), int64(-1)
+	attempts := 0
+	defer func() {
+		if rtCfg().LogRequests {
+			logf("[latency] trace=%s requested=%q prepare_ms=%d xsrf_ms=%d first_text_ms=%d first_reasoning_ms=%d attempts=%d total_ms=%d",
+				traceID, mc.Upstream, prepMs, xsrfMs, firstTextMs, firstReasoningMs, attempts, time.Since(t0).Milliseconds())
+		}
+	}()
 	var files []fileRef
 
 	// 先挑号，再按它上次绑的出口挑代理 —— 同一个账号要尽量固定从同一个 IP 出去，
@@ -457,6 +487,7 @@ func streamGenerateOnce(prompt, latest string, mc ModelConfig, pending []pending
 		return &StreamResult{
 			AccountID: cookieID, AccountLabel: cookieLabel,
 			ProxyID: picked.ID, ProxyName: picked.Name,
+			TotalMs: time.Since(t0).Milliseconds(),
 		}, err
 	}
 
@@ -488,7 +519,9 @@ func streamGenerateOnce(prompt, latest string, mc ModelConfig, pending []pending
 		tried[acct.ID] = true
 		// 归属先记上：这一轮失败了也留痕，面板上看得出是哪个号在坏
 		cookieID, cookieLabel = acct.ID, accountDisplayName(acct)
+		xsrfStart := time.Now()
 		tok, err := getXSRF(acct.Cookie, acct.AuthUser, proxyURL)
+		xsrfMs += time.Since(xsrfStart).Milliseconds()
 		if err == nil {
 			cookieStr, sapisid, xsrfToken = acct.Cookie, extractSAPISID(acct.Cookie), tok
 			authUser = acct.AuthUser
@@ -724,7 +757,7 @@ func streamGenerateOnce(prompt, latest string, mc ModelConfig, pending []pending
 	// cookie 健康度只认 401/403，别的状态不算 cookie 的错，见 markCookieByStatus。
 	lastStatus := 0
 	xsrfRetried := false // XSRF 自愈只做一次，避免死循环
-	t0 := time.Now()
+	prepMs = time.Since(t0).Milliseconds()
 
 	tracker := &deltaTracker{}
 	rtracker := &deltaTracker{}
@@ -745,6 +778,9 @@ func streamGenerateOnce(prompt, latest string, mc ModelConfig, pending []pending
 			if onReasoning != nil {
 				if r := reasoningInLine(line); r != "" {
 					if d := rtracker.Push(r); d != "" {
+						if firstReasoningMs < 0 {
+							firstReasoningMs = time.Since(t0).Milliseconds()
+						}
 						onReasoning(d)
 					}
 				}
@@ -754,6 +790,12 @@ func streamGenerateOnce(prompt, latest string, mc ModelConfig, pending []pending
 			}
 			for _, t := range renderedTextsInLine(line, false) {
 				if d := tracker.Push(t); d != "" {
+					if firstTextMs < 0 {
+						firstTextMs = time.Since(t0).Milliseconds()
+						if rtCfg().LogRequests {
+							logf("[latency] trace=%s account=%d proxy=%d first_text_ms=%d", traceID, cookieID, picked.ID, firstTextMs)
+						}
+					}
 					onDelta(d)
 				}
 			}
@@ -762,13 +804,27 @@ func streamGenerateOnce(prompt, latest string, mc ModelConfig, pending []pending
 	}
 
 	// 新协议（#43）：同一个 inner，只换传输层；返回的 raw 已包成老格式，下面的判断原样适用。
-	useWC := rtCfg().WebChannel
+	useWC := useWebChannelForModel(rtCfg(), mc)
 	wcReq := wcRequest{
 		Inner: wcInnerWithoutPrompt(inner), Prompt: prompt,
 		HexID: mc.HexID, Mode: mc.Mode, Think: mc.thinkWire(),
 		Cookie: cookieStr, SAPISID: sapisid, AuthUser: authUser,
 	}
+	// Match the browser's text-session authentication. This token comes from
+	// the same cached /app fetch as XSRF; never share it across accounts/egresses.
+	if useWC && mc.Tool == 0 && cookieStr != "" {
+		session, err := getBrowserSession(cookieStr, authUser, proxyURL)
+		if err != nil {
+			return attrib(fmt.Errorf("prepare browser text session: %w", err))
+		}
+		wcReq.ServerToken, wcReq.APIKey = session.serverToken, session.apiKey
+		wcReq.BuildLabel = currentBL(proxyURL)
+	}
+	serverTokenRetried := false
+	prepMs = time.Since(t0).Milliseconds()
 	for attempt := 0; attempt < rtCfg().RetryAttempts; attempt++ {
+		attempts++
+		attemptStart := time.Now()
 		var statusCode int
 		var raw []byte
 		var ttfb int64
@@ -780,10 +836,27 @@ func streamGenerateOnce(prompt, latest string, mc ModelConfig, pending []pending
 		} else {
 			statusCode, raw, ttfb, setCookie, err = doGeminiRequest(endpoint, body, geminiHeaders, proxyURL, lineCB)
 		}
+		if rtCfg().LogRequests {
+			logf("[latency] trace=%s attempt=%d web_channel=%t browser_auth=%t status=%d upstream_first_line_ms=%d attempt_ms=%d transport_error=%t reported=%q",
+				traceID, attempts, useWC, wcReq.ServerToken != "", statusCode, ttfb, time.Since(attemptStart).Milliseconds(), err != nil, extractUpstreamModel(string(raw)))
+		}
 		if len(setCookie) > 0 && cookieID > 0 {
 			if merged := mergeSetCookie(cookieStr, setCookie); merged != cookieStr {
 				cookieStr = merged
 				updateAccountCookie(cookieID, merged)
+			}
+		}
+		// A rejected browser token is not proof that the login Cookie expired.
+		// Refresh once on the same account/egress before existing failure handling.
+		if useWC && wcReq.ServerToken != "" && statusCode == http.StatusUnauthorized &&
+			!serverTokenRetried && tracker.emitted == "" && rtracker.emitted == "" {
+			serverTokenRetried = true
+			invalidateXSRF(cookieStr)
+			fresh, refreshErr := getBrowserSession(cookieStr, authUser, proxyURL)
+			if refreshErr == nil && fresh.serverToken != "" {
+				wcReq.ServerToken, wcReq.APIKey = fresh.serverToken, fresh.apiKey
+				attempt--
+				continue
 			}
 		}
 		// 降级不是出口或 cookie 的错，也不该重试：同一个号再发一次还是降级。
@@ -915,7 +988,7 @@ func streamGenerateOnce(prompt, latest string, mc ModelConfig, pending []pending
 			result.ConvCID, result.ConvRID = cid, rid
 			arts, rcid, aerr := fetchMediaArtifacts(
 				mc.Tool, string(raw), cid, rid,
-				cookieStr, sapisid, xsrfToken, proxyURL, mime, authUser)
+				cookieStr, sapisid, xsrfToken, proxyURL, mime, authUser, mc.Image)
 			result.ConvRCID = rcid
 			if aerr != nil {
 				logf("[media] 取回产物失败: %v", aerr)
@@ -1042,7 +1115,7 @@ func doGeminiRequest(endpoint, body string, headers map[string]string, proxyURL 
 		defer resp.Body.Close()
 		raw, ttfb, err := readBody(resp.Body, onLine, sendAt)
 		if err != nil {
-			return resp.StatusCode, nil, ttfb, resp.Header.Values("Set-Cookie"), err
+			return resp.StatusCode, raw, ttfb, resp.Header.Values("Set-Cookie"), err
 		}
 		return resp.StatusCode, raw, ttfb, resp.Header.Values("Set-Cookie"), nil
 	}
@@ -1063,7 +1136,7 @@ func doGeminiRequest(endpoint, body string, headers map[string]string, proxyURL 
 	defer resp.Body.Close()
 	raw, ttfb, err := readBody(resp.Body, onLine, sendAt)
 	if err != nil {
-		return resp.StatusCode, nil, ttfb, resp.Header.Values("Set-Cookie"), err
+		return resp.StatusCode, raw, ttfb, resp.Header.Values("Set-Cookie"), err
 	}
 	return resp.StatusCode, raw, ttfb, resp.Header.Values("Set-Cookie"), nil
 }

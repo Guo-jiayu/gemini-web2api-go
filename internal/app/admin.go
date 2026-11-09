@@ -622,6 +622,9 @@ func handleAdminConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]interface{}{
 			"config": rtCfg(),
 			"models": modelNamesSorted(),
+			"xsrf_cache": map[string]uint64{
+				"hits": xsrfHits.Load(), "misses": xsrfMisses.Load(), "shared": xsrfShared.Load(),
+			},
 			// 部署期配置只读展示，改这些要动 docker-compose.yml 并重启
 			"deploy": map[string]interface{}{
 				"host":        cfg.Host,

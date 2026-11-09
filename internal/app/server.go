@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-const Version = "4.27.1"
+const Version = "4.27.1-newapi"
 
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {
 	body, _ := json.Marshal(data)
@@ -233,6 +233,9 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		modelInput = rtCfg().DefaultModel
 	}
 	modelName, modelCfg, err := resolveModel(modelInput)
+	if err == nil {
+		modelCfg, err = configureImageModel(modelCfg, req)
+	}
 	if err != nil {
 		writeJSON(w, 400, map[string]interface{}{"error": map[string]string{"message": err.Error()}})
 		return
@@ -363,7 +366,7 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	recordRequest("chat.completions", modelName, prompt, text, res, 200, "", stream)
 	if stream {
-		var usage map[string]int
+		var usage map[string]any
 		if includeUsage {
 			usage = usageOf(prompt, text, res)
 		}
@@ -401,12 +404,22 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 }
 
 // usageOf 是 buildUsageWithReasoning 的便捷包装，res 可能为 nil。
-func usageOf(prompt, text string, res *StreamResult) map[string]int {
+func usageOf(prompt, text string, res *StreamResult) map[string]any {
 	r := ""
 	if res != nil {
 		r = res.Reasoning
 	}
-	return buildUsageWithReasoning(prompt, text, r, false)
+	base := buildUsageWithReasoning(prompt, text, r, false)
+	u := make(map[string]any, len(base))
+	for k, v := range base {
+		if k != "reasoning_tokens" {
+			u[k] = v
+		}
+	}
+	if r != "" {
+		u["completion_tokens_details"] = map[string]int{"reasoning_tokens": base["reasoning_tokens"]}
+	}
+	return u
 }
 
 // remainingText 返回最终文本里还没通过 onDelta 发出去的部分。
@@ -461,6 +474,9 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 		modelInput = rtCfg().DefaultModel
 	}
 	modelName, modelCfg, err := resolveModel(modelInput)
+	if err == nil {
+		modelCfg, err = configureImageModel(modelCfg, req)
+	}
 	if err != nil {
 		writeJSON(w, 400, map[string]interface{}{"error": map[string]string{"message": err.Error()}})
 		return
@@ -533,7 +549,9 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 					if role == "" {
 						role = "user"
 					}
-					content := contentToString(item["content"])
+					// Preserve multimodal parts until collectImages has materialized
+					// them. Flattening here silently discarded input_image/video.
+					content := item["content"]
 					messages = append(messages, map[string]interface{}{"role": role, "content": content})
 				}
 			}

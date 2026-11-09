@@ -1,10 +1,14 @@
 package app
 
 import (
+	"bytes"
 	"encoding/base64"
 	"fmt"
+	"image"
+	_ "image/gif"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	fhttp "github.com/bogdanfinn/fhttp"
@@ -73,7 +77,7 @@ func collectImages(messages []map[string]interface{}, proxyURL string) ([]pendin
 				continue
 			}
 			if strings.TrimSpace(src) == "" {
-				continue
+				return nil, fmt.Errorf("media %d: %s missing source; supply a data: URL or http(s) link (file_id is not supported)", len(out)+1, getStr(cm, "type"))
 			}
 			img, err := materializeImage(src, proxyURL, len(out)+1)
 			if err != nil {
@@ -131,61 +135,83 @@ func decodeDataURL(src string, idx int) (pendingUpload, error) {
 	return newMediaUpload(data, mime, idx)
 }
 
-// fetchImage 下载远程图片。走跟正式请求同一个出口：图从别的 IP 拉、对话从这个 IP 发，
-// 除了慢一点没别的好处，还多暴露一个出口。
+// fetchImage downloads a client-supplied reference. Follow ordinary CDN redirects
+// here only; shared upstream clients intentionally keep redirects disabled.
 func fetchImage(src, proxyURL string, idx int) (pendingUpload, error) {
-	var body []byte
-	var ctype string
+	cur := src
+	for hop := 0; hop < 6; hop++ {
+		u, err := url.Parse(cur)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return pendingUpload{}, fmt.Errorf("image %d: reference redirect must target an http(s) URL", idx)
+		}
+		status, ctype, location, body, err := fetchReferenceOnce(cur, proxyURL)
+		if err != nil {
+			return pendingUpload{}, fmt.Errorf("image %d: fetch failed: %w", idx, err)
+		}
+		switch status {
+		case 301, 302, 303, 307, 308:
+			if location == "" {
+				return pendingUpload{}, fmt.Errorf("image %d: redirect missing Location", idx)
+			}
+			cur, err = resolveRef(cur, location)
+			if err != nil {
+				return pendingUpload{}, fmt.Errorf("image %d: invalid redirect Location", idx)
+			}
+			continue
+		case 200:
+			if i := strings.Index(ctype, ";"); i > 0 {
+				ctype = ctype[:i]
+			}
+			return newMediaUpload(body, ctype, idx)
+		default:
+			return pendingUpload{}, fmt.Errorf("image %d: fetch returned HTTP %d", idx, status)
+		}
+	}
+	return pendingUpload{}, fmt.Errorf("image %d: too many reference redirects (maximum 5)", idx)
+}
+
+// Never attach Google cookies/API credentials to reference URLs. Keep the body
+// bounded on every hop, and close redirect/error responses without downloading.
+func fetchReferenceOnce(src, proxyURL string) (int, string, string, []byte, error) {
+	var body io.ReadCloser
+	var status int
+	var ctype, location string
 	if proxyURL != "" {
 		req, err := http.NewRequest("GET", src, nil)
 		if err != nil {
-			return pendingUpload{}, err
+			return 0, "", "", nil, err
 		}
 		applyChromeHeaders(req)
 		resp, err := getStdlibClient(proxyURL).Do(req)
 		if err != nil {
-			return pendingUpload{}, fmt.Errorf("image %d: fetch failed: %w", idx, err)
+			return 0, "", "", nil, err
 		}
-		defer resp.Body.Close()
-		if resp.StatusCode != 200 {
-			return pendingUpload{}, fmt.Errorf("image %d: fetch returned HTTP %d", idx, resp.StatusCode)
-		}
-		ctype = resp.Header.Get("Content-Type")
-		body, err = io.ReadAll(io.LimitReader(resp.Body, maxImageBytes+1))
-		if err != nil {
-			return pendingUpload{}, err
-		}
+		status, body = resp.StatusCode, resp.Body
+		ctype, location = resp.Header.Get("Content-Type"), resp.Header.Get("Location")
 	} else {
 		req, err := fhttp.NewRequest("GET", src, nil)
 		if err != nil {
-			return pendingUpload{}, err
+			return 0, "", "", nil, err
 		}
 		resp, err := getTLSClient().Do(req)
 		if err != nil {
-			return pendingUpload{}, fmt.Errorf("image %d: fetch failed: %w", idx, err)
+			return 0, "", "", nil, err
 		}
-		defer resp.Body.Close()
-		if resp.StatusCode != 200 {
-			return pendingUpload{}, fmt.Errorf("image %d: fetch returned HTTP %d", idx, resp.StatusCode)
-		}
-		ctype = resp.Header.Get("Content-Type")
-		body, err = io.ReadAll(io.LimitReader(resp.Body, maxImageBytes+1))
-		if err != nil {
-			return pendingUpload{}, err
-		}
+		status, body = resp.StatusCode, resp.Body
+		ctype, location = resp.Header.Get("Content-Type"), resp.Header.Get("Location")
 	}
-	if i := strings.Index(ctype, ";"); i > 0 {
-		ctype = ctype[:i]
+	defer body.Close()
+	if status != 200 {
+		return status, ctype, location, nil, nil
 	}
-	if !strings.HasPrefix(ctype, "image/") && !strings.HasPrefix(ctype, "video/") {
-		ctype = "image/png"
-	}
-	return newMediaUpload(body, ctype, idx)
+	data, err := io.ReadAll(io.LimitReader(body, maxImageBytes+1))
+	return status, ctype, location, data, err
 }
 
 // newMediaUpload 按 mime 决定这是图片还是视频：
 //   - video/* → 附件类型位 2（跟抓包一致：文件元组 [路径,2,null,"video/mp4"]），上限 maxVideoBytes；
 //   - 其余当图片 → 类型位 1，上限 maxImageBytes。
+//
 // 类型位 1/2 是服务端认媒体种类的开关，填错模型就按错的类型解析附件。
 func newMediaUpload(data []byte, mime string, idx int) (pendingUpload, error) {
 	if len(data) == 0 {
@@ -205,10 +231,42 @@ func newMediaUpload(data []byte, mime string, idx int) (pendingUpload, error) {
 		return pendingUpload{}, fmt.Errorf("image %d: %d bytes exceeds the %d-byte limit",
 			idx, len(data), maxImageBytes)
 	}
+	actualMime := http.DetectContentType(data)
+	if !strings.HasPrefix(actualMime, "image/") {
+		// Go's sniffer does not recognize ISO-BMFF image containers. Preserve
+		// HEIC/HEIF support by checking their file-type marker, not the URL MIME.
+		actualMime = isoReferenceImageMIME(data)
+		if actualMime == "" {
+			return pendingUpload{}, fmt.Errorf("image %d: downloaded/decoded content is not an image (possibly an HTML login/error page)", idx)
+		}
+	}
+	switch actualMime {
+	case "image/png", "image/jpeg", "image/gif":
+		c, _, err := image.DecodeConfig(bytes.NewReader(data))
+		if err != nil || c.Width <= 0 || c.Height <= 0 {
+			return pendingUpload{}, fmt.Errorf("image %d: invalid or truncated image header", idx)
+		}
+	}
+	mime = actualMime
 	return pendingUpload{
 		Data: data, Mime: mime, Kind: 1,
 		Name: fmt.Sprintf("image%d%s", idx, mediaExt(mime)),
 	}, nil
+}
+
+func isoReferenceImageMIME(data []byte) string {
+	if len(data) < 16 || string(data[4:8]) != "ftyp" {
+		return ""
+	}
+	switch string(data[8:12]) {
+	case "heic", "heix", "hevc", "hevx", "heim", "heis", "hevm", "hevs":
+		return "image/heic"
+	case "mif1", "msf1":
+		return "image/heif"
+	case "avif", "avis":
+		return "image/avif"
+	}
+	return ""
 }
 
 // mediaExt 按 mime 给个扩展名。文件名会显示给模型看，扩展名对不上容易让它误判。
@@ -222,6 +280,10 @@ func mediaExt(mime string) string {
 		return ".gif"
 	case "image/heic":
 		return ".heic"
+	case "image/heif":
+		return ".heif"
+	case "image/avif":
+		return ".avif"
 	case "video/mp4":
 		return ".mp4"
 	case "video/webm":

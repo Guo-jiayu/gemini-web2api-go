@@ -134,17 +134,14 @@ func filterDownloadCookies(cookie string) string {
 // (video extension) the history also holds earlier turns' videos, which must not be
 // mistaken for this one. Returns the turn's response-candidate id (rcid) as well,
 // which is needed to continue the conversation again.
-func fetchMediaArtifacts(tool int, raw, cid, rid, cookie, sapisid, xsrf, proxyURL, defaultMime string, authuser int) ([]MediaArtifact, string, error) {
+func fetchMediaArtifacts(tool int, raw, cid, rid, cookie, sapisid, xsrf, proxyURL, defaultMime string, authuser int, options ImageOptions) ([]MediaArtifact, string, error) {
 	if tool == toolImage {
-		// 放大（#62）失败一律退回原来的下载，不重新生成。
-		if rtCfg().ImageUpscale && xsrf != "" {
-			arts, err := fetchUpscaledImages(raw, cid, rid, cookie, sapisid, xsrf, proxyURL, defaultMime, authuser)
-			if err == nil && len(arts) > 0 {
-				return arts, "", nil
-			}
-			logf("[upscale] 放大失败，改下原图: %v", err)
-		}
-		arts, err := fetchImageArtifacts(raw, cid, cookie, sapisid, xsrf, proxyURL, defaultMime, authuser)
+		arts, err := downloadRequestedImages(options, rtCfg().ImageUpscale && xsrf != "",
+			func() ([]MediaArtifact, error) {
+				return fetchUpscaledImages(raw, cid, rid, cookie, sapisid, xsrf, proxyURL, defaultMime, authuser)
+			}, func() ([]MediaArtifact, error) {
+				return fetchImageArtifacts(raw, cid, cookie, sapisid, xsrf, proxyURL, defaultMime, authuser)
+			})
 		return arts, "", err
 	}
 	// 音乐几乎立刻就绪，视频要生成几十秒到几分钟，所以视频轮询给足预算。

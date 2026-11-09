@@ -31,7 +31,8 @@ import (
 //  1. 握手 POST count=0：拿 gsessionid（响应头）和 SID（响应体）。鉴权在这一步绑到会话上：
 //     $httpHeaders 里的 API key、模型头、SAPISIDHASH，加上这条请求本身带的 cookie。
 //  2. 下行 GET 长轮询：帧是「长度\n JSON」首尾相接。服务端约 60 秒空闲就关，要带 AID 重连。
-//  3. 上行 POST：ofs=0 发 inner（正文槽留空）；下行回了确认后隔 wcPromptGap 发 ofs=1 正文；
+//  3. 网页文本鉴权使用同页 X-Server-Token，metadata 与正文合并为 count=2/ofs=0。
+//     旧鉴权路径仍分开发送：ofs=0 发 inner，确认后隔 wcPromptGap 发 ofs=1 正文；
 //     看到「生成完毕」标记后发 ofs=2 收尾，服务端发完剩余帧（标题等）再给结束帧
 //     [null,null,null,[]]。
 //
@@ -42,11 +43,13 @@ import (
 //   - 不声明 X-WebChannel-Content-Type: application/json+protobuf：400「Root element must be
 //     a message」，服务端按 proto3 JSON 解析，JSPB 数组被拒。
 //   - GET 不带凭证、不带 SAPISIDHASH 都不影响结果。
-//   - ofs=0 之后立即发正文：多数只回会话 id 和 rid、不生成，见 wcPromptGap。
+//   - 旧鉴权路径分开发送时，ofs=0 之后立即发正文可能不生成，见 wcPromptGap。
+//     此结论不适用于网页鉴权的同批两条消息。
 //
 // 覆盖范围：单轮这条路（streamGenerateOnce），实测文本（3.6 Flash / 3.1 Pro / Flash-Lite，
 // 流式和非流式）、看图、生图、匿名都通。多轮续接（conversation.go）仍走老端点。
-// 已知限制：扩展思考没切成功——模型头字段 16 照发，回报仍是「3.1 Pro」而不是「3.1 Pro High」。
+// 模型和思考档位按请求保留。网页也可能仅回报基础模型名，不能凭没有 High 后缀
+// 认定档位无效，也不能仅凭参数已发送就宣称思考行为得到完整验证。
 // 音乐、视频没测。
 const wcEndpoint = "https://geminiweb-pa.clients6.google.com/v1/processSession"
 
@@ -62,14 +65,17 @@ const wcPromptGap = 500 * time.Millisecond
 
 // wcRequest 是一次新协议请求需要的全部输入。
 type wcRequest struct {
-	Inner    []interface{} // ofs=0 发的 inner，正文槽留空
-	Prompt   string        // ofs=1 发的正文
-	HexID    string
-	Mode     int
-	Think    int
-	Cookie   string
-	SAPISID  string
-	AuthUser int
+	Inner       []interface{} // ofs=0 发的 inner，正文槽留空
+	Prompt      string        // ofs=1 发的正文
+	HexID       string
+	Mode        int
+	Think       int
+	Cookie      string
+	SAPISID     string
+	AuthUser    int
+	ServerToken string
+	APIKey      string
+	BuildLabel  string
 }
 
 // wcStatusError 是服务端在下行帧里给的错误（{"__sm__":{"status":…}}）。
@@ -162,6 +168,43 @@ func appendVarint(b []byte, v uint64) []byte {
 	return append(b, byte(v))
 }
 
+func appendProtoBytes(b []byte, field int, value []byte) []byte {
+	b = appendVarint(b, uint64(field<<3|2))
+	b = appendVarint(b, uint64(len(value)))
+	return append(b, value...)
+}
+
+func wcBrowserModelHeaderBin(hexID string, mode, think int, requestID, buildLabel string) string {
+	b, _ := base64.StdEncoding.DecodeString(wcModelHeaderBin(hexID, mode, think))
+	b = appendProtoBytes(b, 7, []byte("en"))
+	b = append(b, 0x40, 0)
+	// The current browser's advertised text capabilities, observed in its
+	// model header. These are independent of the selected model/thinking tier.
+	b = appendProtoBytes(b, 9, []byte{4, 33, 22, 5, 6, 8, 16, 19, 20})
+	b = append(b, 0x60, 2)
+	b = appendProtoBytes(b, 17, []byte(requestID))
+	if buildLabel != "" {
+		b = appendProtoBytes(b, 18, appendProtoBytes(nil, 1, []byte(buildLabel)))
+	}
+	return base64.StdEncoding.EncodeToString(b)
+}
+
+func wcBrowserTextInner(inner []interface{}) []interface{} {
+	n := len(inner)
+	if n < 99 {
+		n = 99
+	}
+	out := make([]interface{}, n)
+	copy(out, inner)
+	// Fresh browser conversations omit the empty continuation tuple and
+	// advertise all current text capabilities. Keep model/tier slots intact.
+	out[2] = nil
+	out[30] = []interface{}{4, 16, 19}
+	out[49] = 0
+	out[91], out[96], out[98] = 1, 1, 1
+	return out
+}
+
 // wcHTTPHeaders 是握手 URL 里 $httpHeaders 的值（"K:V\r\n" 拼接）。
 // 授权头只在有 cookie 时加：带授权头不带 cookie 服务端判「缺凭证」（见文件头）。
 // 新协议的 host 带不了 /u/N 路径，选号靠 X-Goog-AuthUser（浏览器抓包如此）。
@@ -169,9 +212,25 @@ func wcHTTPHeaders(apiKey string, r wcRequest) string {
 	var b strings.Builder
 	add := func(k, v string) { b.WriteString(k + ":" + v + "\r\n") }
 	add("X-Goog-Api-Key", apiKey)
-	add("x-goog-ext-525001261-bin", wcModelHeaderBin(r.HexID, r.Mode, r.Think))
+	if r.ServerToken != "" {
+		add("x-goog-ext-525001261-bin", wcBrowserModelHeaderBin(r.HexID, r.Mode, r.Think, uuid.NewString(), r.BuildLabel))
+		add("x-goog-ext-73010989-bin", "CAA=")
+		add("x-goog-ext-73010990-bin", "CAAQABgA")
+		if len(r.Inner) > 59 {
+			if id, ok := r.Inner[59].(string); ok && id != "" {
+				b := appendProtoBytes(nil, 1, []byte(id))
+				b = append(b, 0x10, 1)
+				add("x-goog-ext-525005358-bin", base64.StdEncoding.EncodeToString(b))
+			}
+		}
+	} else {
+		add("x-goog-ext-525001261-bin", wcModelHeaderBin(r.HexID, r.Mode, r.Think))
+	}
 	add("X-WebChannel-Content-Type", "application/json+protobuf")
-	if r.Cookie != "" && r.SAPISID != "" {
+	if r.ServerToken != "" {
+		add("X-Server-Token", r.ServerToken)
+		add("X-Goog-AuthUser", strconv.Itoa(r.AuthUser))
+	} else if r.Cookie != "" && r.SAPISID != "" {
 		add("Authorization", makeSAPISIDHash(r.SAPISID))
 		add("X-Goog-AuthUser", strconv.Itoa(r.AuthUser))
 	}
@@ -194,6 +253,23 @@ type wcResp struct {
 	setCookie []string
 	sessionID string
 	body      io.ReadCloser
+}
+
+// Keep credentials embedded in the handshake query out of logs and API errors.
+func redactWCError(err error) error {
+	var ue *url.Error
+	if !errors.As(err, &ue) {
+		return err
+	}
+	copy := *ue
+	if u, parseErr := url.Parse(copy.URL); parseErr == nil {
+		u.RawQuery, u.Fragment, u.User = "", "", nil
+		u.ForceQuery = false
+		copy.URL = u.String()
+	} else {
+		copy.URL = wcEndpoint
+	}
+	return &copy
 }
 
 // wcSend 发一条请求。跟 doGeminiRequest 同一套出口规则：配了代理走 stdlib，直连走 tls-client。
@@ -225,7 +301,7 @@ func wcSend(ctx context.Context, method, u, body, cookie, proxyURL string) (*wcR
 		}
 		resp, err := getStdlibClient(proxyURL).Do(req)
 		if err != nil {
-			return nil, err
+			return nil, redactWCError(err)
 		}
 		return &wcResp{resp.StatusCode, resp.Header.Values("Set-Cookie"),
 			resp.Header.Get("X-HTTP-Session-Id"), resp.Body}, nil
@@ -239,7 +315,7 @@ func wcSend(ctx context.Context, method, u, body, cookie, proxyURL string) (*wcR
 	}
 	resp, err := getTLSClient().Do(req)
 	if err != nil {
-		return nil, err
+		return nil, redactWCError(err)
 	}
 	return &wcResp{resp.StatusCode, resp.Header.Values("Set-Cookie"),
 		resp.Header.Get("X-HTTP-Session-Id"), resp.Body}, nil
@@ -392,9 +468,16 @@ func wcParseStatus(p json.RawMessage) *wcStatusError {
 // 映射成状态码，body 是错误文本，让上层的重试和 cookie 健康度逻辑原样生效。
 func doWebChannelRequest(r wcRequest, proxyURL string, onLine func(string) error) (int, []byte, int64, []string, error) {
 	sendAt := time.Now()
-	apiKey, err := webChannelAPIKey(proxyURL)
-	if err != nil {
-		return 0, nil, 0, nil, err
+	if r.ServerToken != "" {
+		r.Inner = wcBrowserTextInner(r.Inner)
+	}
+	apiKey := r.APIKey
+	if apiKey == "" {
+		var err error
+		apiKey, err = webChannelAPIKey(proxyURL)
+		if err != nil {
+			return 0, nil, 0, nil, err
+		}
 	}
 	timeout := time.Duration(rtCfg().RequestTimeout) * time.Second
 	if timeout <= 0 {
@@ -410,6 +493,11 @@ func doWebChannelRequest(r wcRequest, proxyURL string, onLine func(string) error
 		setCookie = append(setCookie, sc...)
 		setCookieMu.Unlock()
 	}
+	cookies := func() []string {
+		setCookieMu.Lock()
+		defer setCookieMu.Unlock()
+		return append([]string(nil), setCookie...)
+	}
 
 	// 1) 握手
 	rid := int64(10000 + rand.Intn(80000))
@@ -424,7 +512,7 @@ func doWebChannelRequest(r wcRequest, proxyURL string, onLine func(string) error
 	hsBody, _ := io.ReadAll(io.LimitReader(hs.body, 1<<20))
 	hs.body.Close()
 	if hs.status != 200 {
-		return hs.status, hsBody, 0, setCookie, nil
+		return hs.status, hsBody, 0, cookies(), nil
 	}
 	var sid string
 	_ = wcReadFrames(strings.NewReader(string(hsBody)), func(it wcItem) bool {
@@ -437,7 +525,7 @@ func doWebChannelRequest(r wcRequest, proxyURL string, onLine func(string) error
 	})
 	gsid := hs.sessionID
 	if sid == "" || gsid == "" {
-		return 502, []byte("processSession 握手没拿到会话: " + truncate(string(hsBody), 200)), 0, setCookie, nil
+		return 502, []byte("processSession 握手没拿到会话: " + truncate(string(hsBody), 200)), 0, cookies(), nil
 	}
 	sess := fmt.Sprintf("gsessionid=%s&SID=%s", url.QueryEscape(gsid), url.QueryEscape(sid))
 
@@ -497,15 +585,14 @@ func doWebChannelRequest(r wcRequest, proxyURL string, onLine func(string) error
 	}()
 
 	// 3) 上行
-	post := func(ofs int, data interface{}) error {
-		j, err := json.Marshal(data)
+	post := func(ofs int, messages ...interface{}) error {
+		form, err := wcMessageForm(ofs, messages...)
 		if err != nil {
 			return err
 		}
 		n := atomic.AddInt64(&rid, 1) - 1
 		pURL := fmt.Sprintf("%s?VER=8&%s&RID=%d&AID=%d&zx=%s&t=1", wcEndpoint, sess, n, lastID.Load(), wcZX())
-		resp, err := wcSend(ctx, "POST", pURL,
-			fmt.Sprintf("count=1&ofs=%d&req0___data__=%s", ofs, url.QueryEscape(string(j))), r.Cookie, proxyURL)
+		resp, err := wcSend(ctx, "POST", pURL, form, r.Cookie, proxyURL)
 		if err != nil {
 			return err
 		}
@@ -522,16 +609,29 @@ func doWebChannelRequest(r wcRequest, proxyURL string, onLine func(string) error
 		[]interface{}{nil, nil, nil, nil, []interface{}{r.Inner, nil, nil, 1}}}}
 	ofs1 := []interface{}{nil, []interface{}{1, nil, nil, nil, nil, nil, nil, nil, []interface{}{r.Prompt}}}
 	ofs2 := []interface{}{nil, nil, nil, []interface{}{1}}
-	// 先等下行建立：ofs=0 的确认要从下行收，下行没建立就等不到。
-	select {
-	case <-getReady:
-	case e := <-getErr:
-		return 0, nil, 0, setCookie, e
-	case <-ctx.Done():
-		return 0, nil, 0, setCookie, fmt.Errorf("processSession 下行没建立（%s）", timeout)
-	}
-	if err := post(0, ofs0); err != nil {
-		return 0, nil, 0, setCookie, err
+	// The current browser submits session metadata and the prompt together.
+	// Do not race separate requests or depend on a guessed 500 ms readiness gap.
+	batched := r.ServerToken != ""
+	var uploadDone <-chan error
+	if batched {
+		// The downlink can deliver text before the upload response ends. Keep
+		// forwarding it while waiting for acknowledgement, as the browser does.
+		// A buffered result lets cancellation/end-of-stream release this goroutine
+		// even after the caller has returned. Request state remains session-local.
+		done := make(chan error, 1)
+		uploadDone = done
+		go func() { done <- post(0, ofs0, ofs1) }()
+	} else {
+		select {
+		case <-getReady:
+		case e := <-getErr:
+			return 0, nil, 0, cookies(), e
+		case <-ctx.Done():
+			return 0, nil, 0, cookies(), fmt.Errorf("processSession 下行没建立（%s）", timeout)
+		}
+		if err := post(0, ofs0); err != nil {
+			return 0, nil, 0, cookies(), err
+		}
 	}
 
 	// 4) 收下行，直到结束帧。正文（ofs=1）要等下行回了对 ofs=0 的确认（[[]]）再发：
@@ -540,7 +640,7 @@ func doWebChannelRequest(r wcRequest, proxyURL string, onLine func(string) error
 	var raw strings.Builder
 	var ttfb int64 = -1
 	closing := false
-	promptSent := false
+	promptSent := batched
 	sendPrompt := func() error {
 		promptSent = true
 		time.Sleep(wcPromptGap)
@@ -550,10 +650,15 @@ func doWebChannelRequest(r wcRequest, proxyURL string, onLine func(string) error
 	defer ackTimer.Stop()
 	for {
 		select {
+		case err := <-uploadDone:
+			uploadDone = nil
+			if err != nil {
+				return 0, []byte(raw.String()), ttfbOr(ttfb, sendAt), cookies(), err
+			}
 		case <-ackTimer.C:
 			if !promptSent {
 				if err := sendPrompt(); err != nil {
-					return 0, nil, 0, setCookie, err
+					return 0, nil, 0, cookies(), err
 				}
 			}
 			continue
@@ -561,21 +666,21 @@ func doWebChannelRequest(r wcRequest, proxyURL string, onLine func(string) error
 			if !ok {
 				select {
 				case e := <-getErr:
-					return 0, []byte(raw.String()), ttfbOr(ttfb, sendAt), setCookie, e
+					return 0, []byte(raw.String()), ttfbOr(ttfb, sendAt), cookies(), e
 				default:
 				}
 				if ctx.Err() != nil {
-					return 0, []byte(raw.String()), ttfbOr(ttfb, sendAt), setCookie,
+					return 0, []byte(raw.String()), ttfbOr(ttfb, sendAt), cookies(),
 						fmt.Errorf("processSession 超时（%s）", timeout)
 				}
-				return 200, []byte(raw.String()), ttfbOr(ttfb, sendAt), setCookie, nil
+				return 200, []byte(raw.String()), ttfbOr(ttfb, sendAt), cookies(), nil
 			}
 			if ev.Err != nil {
-				return ev.Err.httpStatus(), []byte(ev.Err.Error()), ttfbOr(ttfb, sendAt), setCookie, nil
+				return ev.Err.httpStatus(), []byte(ev.Err.Error()), ttfbOr(ttfb, sendAt), cookies(), nil
 			}
 			if ev.Ack && !promptSent {
 				if err := sendPrompt(); err != nil {
-					return 0, nil, 0, setCookie, err
+					return 0, nil, 0, cookies(), err
 				}
 			}
 			if ev.Line != "" {
@@ -586,7 +691,7 @@ func doWebChannelRequest(r wcRequest, proxyURL string, onLine func(string) error
 				raw.WriteByte('\n')
 				if onLine != nil {
 					if err := onLine(ev.Line); err != nil {
-						return 200, []byte(raw.String()), ttfb, setCookie, err
+						return 200, []byte(raw.String()), ttfb, cookies(), err
 					}
 				}
 			}
@@ -596,10 +701,10 @@ func doWebChannelRequest(r wcRequest, proxyURL string, onLine func(string) error
 				go func() { _ = post(2, ofs2) }()
 			}
 			if ev.End {
-				return 200, []byte(raw.String()), ttfbOr(ttfb, sendAt), setCookie, nil
+				return 200, []byte(raw.String()), ttfbOr(ttfb, sendAt), cookies(), nil
 			}
 		case <-ctx.Done():
-			return 0, []byte(raw.String()), ttfbOr(ttfb, sendAt), setCookie,
+			return 0, []byte(raw.String()), ttfbOr(ttfb, sendAt), cookies(),
 				fmt.Errorf("processSession 超时（%s）", timeout)
 		}
 	}
@@ -610,6 +715,18 @@ func ttfbOr(ttfb int64, start time.Time) int64 {
 		return ttfb
 	}
 	return time.Since(start).Milliseconds()
+}
+
+func wcMessageForm(ofs int, messages ...interface{}) (string, error) {
+	form := url.Values{"count": {strconv.Itoa(len(messages))}, "ofs": {strconv.Itoa(ofs)}}
+	for i, message := range messages {
+		encoded, err := json.Marshal(message)
+		if err != nil {
+			return "", err
+		}
+		form.Set(fmt.Sprintf("req%d___data__", i), string(encoded))
+	}
+	return form.Encode(), nil
 }
 
 // wcInnerWithoutPrompt 复制一份 inner，把正文槽清空：浏览器在 ofs=0 发空正文，正文走 ofs=1。

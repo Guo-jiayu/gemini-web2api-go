@@ -25,3 +25,10 @@ vendor/
 
 # ─── 本地工程笔记（给 Claude 跨会话续接，不入库不分发）──
 docs/local/
+
+# Private local account diagnostics (keep on disk, never publish).
+LOCAL-SETUP.md
+docs/latency-*.md
+docs/latency-*.json
+docs/pro-upload-ack-fix.*
+docs/pro-web-comparison.*

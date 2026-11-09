@@ -13,6 +13,8 @@
 
 中文 | [English](README_EN.md)
 
+> 此 fork 的 `dev` 分支增加 QQhuxuhui/new-api 兼容：OpenAI 图片生成/编辑接口、图片 SSE、参考图上传和标准推理用量字段。渠道类型、参数格式和限制见 [new-api 接入说明](docs/new-api.md)。
+
 > 官方仓库：**[github.com/zexadev/gemini-web2api-go](https://github.com/zexadev/gemini-web2api-go)** —— 发版、issue、文档都在这里；各 fork 不由本仓维护。
 
 把 Google Gemini 网页端反代成 OpenAI 兼容 API，同一端口还提供 Gemini 原生接口和 MCP 工具。**单二进制**，**零账号**（匿名可跑），**Chrome 146 真指纹**，**SQLite / MySQL / PostgreSQL**，自带**中文管理面板**。
@@ -427,7 +429,22 @@ curl http://127.0.0.1:8083/v1/chat/completions \
 不转外链是有意的——Gemini 的产物链要带 cookie 才下得到，直接把链给客户端它打不开，
 所以服务端下回字节再转 base64。产物的 base64 **不计进 `completion_tokens`**（否则一张图
 上百万 token，下游按它计费就离谱了），只算模型附带的说明文字。都要登录态，没 cookie
-时这俩模型不进 `/v1/models`。参数如 `size` / `n` 上游没有对应旋钮，传了会被忽略。
+时这俩模型不进 `/v1/models`。`n > 1` 不支持，返回 400。
+
+**本地扩展：生图清晰度与比例参数**（`4.27.1-image-options`）：
+
+- OpenAI Chat / Responses：`image_size: "1K" | "2K" | "4K"`、`aspect_ratio: "16:9"`。
+- Gemini 原生：`generationConfig.imageConfig.imageSize`、`generationConfig.imageConfig.aspectRatio`。
+- 明确传 `1K` 使用普通预览下载；`2K` 及以上（接受 2K–8K 整数档）按本次请求启用原图/放大下载，不修改全局开关。不传清晰度则沿用全局设置。
+- 比例支持 `1:1`、`16:9`、`9:16`、`4:3`、`3:4`、`3:2`、`2:3`、`4:5`、`5:4`、`21:9`。转换为上游生图指令，再验证实际图片比例（允许像素网格带来的 2% 相对误差）。不做本地缩放或裁切。
+- 不接受 `3840x2160` 这类像素尺寸；参数不合法或互相冲突返回 400。比例明显不符、明确请求 2K 以上但原图下载失败则报错，不默默返回不符要求的图片。
+- **清晰度档位用于选择下载方式，不承诺精确像素或原生 4K**。2K、4K 都调用网页原图/放大能力，实际大小受账号和上游限制。
+
+完整请求示例与实测记录见 [生图参数说明](docs/image-options.md)。
+
+参考图编辑支持 Chat `image_url`、Gemini `inlineData`、Responses `input_image`。本地 `4.27.1-image-reference-fix` 已修复 Responses 将内容提前转成纯文本、导致参考图被丢弃的问题；缺少图片来源返回 400。传参格式、修复前后对照见 [参考图编辑说明](docs/reference-image-editing.md)。
+
+后续 `4.27.1-image-reference-v2` 增加图片直链重定向支持（最多 5 次），识别实际图片 MIME 并拦截 HTML 登录页、错误内容和常见格式损坏的图片头。三协议的流式、多图、公网 HTTPS、JPEG/PNG/WebP 均已实测。
 
 **要更大、更清楚的图**，在管理面板「设置」页打开 **生图下载原图/放大**（`image_upscale`）。
 打开后照网页「下载」按钮那样取图：**Ultra 号**的图会放大到宽高各 2 倍（1376×768 → 2752×1536，

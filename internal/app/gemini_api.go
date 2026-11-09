@@ -42,7 +42,8 @@ type geminiAPIRequest struct {
 		} `json:"functionCallingConfig"`
 	} `json:"toolConfig"`
 	GenerationConfig struct {
-		CandidateCount int `json:"candidateCount"`
+		ImageConfig    map[string]interface{} `json:"imageConfig"`
+		CandidateCount int                    `json:"candidateCount"`
 		ThinkingConfig struct {
 			IncludeThoughts bool `json:"includeThoughts"`
 		} `json:"thinkingConfig"`
@@ -478,6 +479,13 @@ func prepareGemini(w http.ResponseWriter, r *http.Request, model string) (*gemin
 	if err != nil {
 		writeGeminiError(w, 400, err.Error())
 		return nil, false
+	}
+	if req.GenerationConfig.ImageConfig != nil {
+		modelCfg, err = configureImageModel(modelCfg, req.GenerationConfig.ImageConfig)
+		if err != nil {
+			writeGeminiError(w, 400, err.Error())
+			return nil, false
+		}
 	}
 	check := map[string]interface{}{}
 	if n := req.GenerationConfig.CandidateCount; n > 1 {

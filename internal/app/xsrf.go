@@ -1,8 +1,11 @@
 package app
 
 import (
+	"context"
 	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	fhttp "github.com/bogdanfinn/fhttp"
@@ -24,15 +28,28 @@ import (
 // 绑定，所以按 cookie 分别缓存。实测同一 token 可以复用，过期后服务端还是回 xsrf
 // 错误，调用方拿到这个错要 invalidate 再取一次。
 var (
-	xsrfMu    sync.Mutex
-	xsrfCache = map[string]xsrfEntry{}
+	xsrfMu      sync.Mutex
+	xsrfCache   = map[string]xsrfEntry{}
+	xsrfPending = map[string]*xsrfCall{}
+	xsrfHits    atomic.Uint64
+	xsrfMisses  atomic.Uint64
+	xsrfShared  atomic.Uint64
 )
 
+type xsrfCall struct {
+	done        chan struct{}
+	entry       xsrfEntry
+	err         error
+	invalidated bool
+}
+
 type xsrfEntry struct {
-	token   string
-	pushID  string // 上传文件用的 Push-ID 头
-	pctx    string // 上传文件用的 X-Client-Pctx 头
-	fetched time.Time
+	token       string
+	pushID      string // 上传文件用的 Push-ID 头
+	pctx        string // 上传文件用的 X-Client-Pctx 头
+	serverToken string // 网页文本连接使用的账号会话令牌，按会话和出口隔离
+	apiKey      string // 同页取得，避免首次文本请求再抓一次匿名页面
+	fetched     time.Time
 }
 
 // 页面上的 token 没写明有效期，取个保守值定期重取。
@@ -45,16 +62,50 @@ var pushIDRe = regexp.MustCompile(`"qKIAYe":"([^"]{4,400})"`)
 
 var pctxRe = regexp.MustCompile(`"Ylro7b":"([^"]{4,400})"`)
 
+var serverTokenRe = regexp.MustCompile(`"PI9WOb":("(?:[^"\\]|\\.)*")`)
+
+func appServerToken(body []byte) string {
+	m := serverTokenRe.FindSubmatch(body)
+	if len(m) != 2 {
+		return ""
+	}
+	var token string
+	if json.Unmarshal(m[1], &token) != nil {
+		return ""
+	}
+	return token
+}
+
+func getBrowserSession(cookie string, authuser int, proxyURL string) (xsrfEntry, error) {
+	if cookie == "" {
+		return xsrfEntry{}, nil
+	}
+	return cachedAppTokens(cookie, authuser, proxyURL, fetchAppTokens)
+}
+
 // cookieKey 用 cookie 的短摘要当缓存键，避免把整串凭证塞进 map key。
 func cookieKey(cookie string) string {
 	sum := sha1.Sum([]byte(cookie))
 	return hex.EncodeToString(sum[:8])
 }
 
-// xsrfKey 是缓存键：cookie 摘要 + 账号序号。同一串 cookie 里登着好几个号时，
-// 每个号（/u/N）页面给的 SNlM0e 不一样，拿错号的 token 发请求直接 400。
+// Only stable session credentials participate in this key. Google rotates SIDCC /
+// SIDTS on ordinary responses; those changes must not trigger another /app GET.
+// A new login, different account index, or changed signing credential is isolated.
 func xsrfKey(cookie string, authuser int) string {
-	return cookieKey(cookie) + "/" + strconv.Itoa(authuser)
+	var credentials []string
+	for _, name := range []string{"SID", "__Secure-1PSID", "__Secure-3PSID",
+		"SAPISID", "__Secure-1PAPISID", "__Secure-3PAPISID"} {
+		if value := cookieValue(cookie, name); value != "" {
+			credentials = append(credentials, name+"="+value)
+		}
+	}
+	identity := strings.Join(credentials, "; ")
+	if identity == "" {
+		identity = cookie
+	}
+	sum := sha256.Sum256([]byte(identity))
+	return hex.EncodeToString(sum[:]) + "/" + strconv.Itoa(authuser)
 }
 
 // geminiBase 是某个账号序号对应的 gemini.google.com 前缀。
@@ -78,7 +129,20 @@ func invalidateXSRF(cookie string) {
 	}
 	xsrfMu.Lock()
 	for n := 0; n <= maxAuthUser; n++ {
-		delete(xsrfCache, xsrfKey(cookie, n))
+		key := xsrfKey(cookie, n)
+		for k := range xsrfCache {
+			if k == key || strings.HasPrefix(k, key+"/") {
+				delete(xsrfCache, k)
+			}
+		}
+		// Detach an in-flight fetch too: it must not repopulate an invalidated
+		// session. Existing waiters will retry against the new generation.
+		for k, call := range xsrfPending {
+			if k == key || strings.HasPrefix(k, key+"/") {
+				call.invalidated = true
+				delete(xsrfPending, k)
+			}
+		}
 	}
 	xsrfMu.Unlock()
 }
@@ -89,44 +153,80 @@ func getXSRF(cookie string, authuser int, proxyURL string) (string, error) {
 	if cookie == "" {
 		return "", nil
 	}
-	key := xsrfKey(cookie, authuser)
-
-	xsrfMu.Lock()
-	if e, ok := xsrfCache[key]; ok && time.Since(e.fetched) < xsrfTTL {
-		xsrfMu.Unlock()
-		return e.token, nil
-	}
-	xsrfMu.Unlock()
-
-	e, err := fetchAppTokens(cookie, authuser, proxyURL)
-	if err != nil {
-		return "", err
-	}
-	xsrfMu.Lock()
-	xsrfCache[key] = e
-	xsrfMu.Unlock()
-	return e.token, nil
+	e, err := cachedAppTokens(cookie, authuser, proxyURL, fetchAppTokens)
+	return e.token, err
 }
 
 // getUploadTokens 取上传要用的 Push-ID / X-Client-Pctx，跟 XSRF token 同一份缓存。
 func getUploadTokens(cookie string, authuser int, proxyURL string) (pushID, pctx string, err error) {
-	key := xsrfKey(cookie, authuser)
+	e, err := cachedAppTokens(cookie, authuser, proxyURL, fetchAppTokens)
+	return e.pushID, e.pctx, err
+}
 
-	xsrfMu.Lock()
-	if e, ok := xsrfCache[key]; ok && time.Since(e.fetched) < xsrfTTL {
+// Cache and coalesce both token consumers. Expired entries are evicted during
+// misses so a server that imports many accounts does not retain them forever.
+func cachedAppTokens(cookie string, authuser int, proxyURL string,
+	fetch func(string, int, string) (xsrfEntry, error)) (xsrfEntry, error) {
+	start := time.Now()
+	key := xsrfCacheKey(cookie, authuser, proxyURL)
+	for {
+		xsrfMu.Lock()
+		if e, ok := xsrfCache[key]; ok && time.Since(e.fetched) < xsrfTTL {
+			xsrfMu.Unlock()
+			xsrfHits.Add(1)
+			return e, nil
+		}
+		if call := xsrfPending[key]; call != nil {
+			xsrfMu.Unlock()
+			xsrfShared.Add(1)
+			<-call.done
+			xsrfMu.Lock()
+			current := !call.invalidated
+			xsrfMu.Unlock()
+			if current {
+				return call.entry, call.err
+			}
+			// A completed successful fetch is now in the cache. A detached fetch
+			// was invalidated; loop instead of trusting its stale result.
+			continue
+		}
+		for k, e := range xsrfCache {
+			if time.Since(e.fetched) >= xsrfTTL {
+				delete(xsrfCache, k)
+			}
+		}
+		call := &xsrfCall{done: make(chan struct{})}
+		xsrfPending[key] = call
 		xsrfMu.Unlock()
-		return e.pushID, e.pctx, nil
+		xsrfMisses.Add(1)
+		e, err := fetch(cookie, authuser, proxyURL)
+		xsrfMu.Lock()
+		current := xsrfPending[key] == call
+		if current {
+			delete(xsrfPending, key)
+			if err == nil {
+				xsrfCache[key] = e
+			}
+		}
+		call.entry, call.err = e, err
+		close(call.done)
+		xsrfMu.Unlock()
+		if !current {
+			continue
+		}
+		if rtCfg().LogRequests {
+			logf("[xsrf] cache=miss authuser=%d fetch_ms=%d ok=%t hits=%d misses=%d shared=%d", authuser, time.Since(start).Milliseconds(), err == nil, xsrfHits.Load(), xsrfMisses.Load(), xsrfShared.Load())
+		}
+		return e, err
 	}
-	xsrfMu.Unlock()
+}
 
-	e, err := fetchAppTokens(cookie, authuser, proxyURL)
-	if err != nil {
-		return "", "", err
+func xsrfCacheKey(cookie string, authuser int, proxyURL string) string {
+	key := xsrfKey(cookie, authuser)
+	if proxyURL != "" {
+		key += "/" + cookieKey(proxyURL)
 	}
-	xsrfMu.Lock()
-	xsrfCache[key] = e
-	xsrfMu.Unlock()
-	return e.pushID, e.pctx, nil
+	return key
 }
 
 // fetchAppPage 抓 gemini.google.com/app 的 HTML。
@@ -135,6 +235,9 @@ func getUploadTokens(cookie string, authuser int, proxyURL string) (pushID, pctx
 // cookie 传空串就是匿名抓（页面照样返回，只是没有登录态字段）。
 // authuser>0 抓 /u/N/app，页面里的 token 才是第 N 个号的。
 func fetchAppPage(cookie string, authuser int, proxyURL string) ([]byte, error) {
+	// Session setup must not inherit the multi-minute generation timeout.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	pageURL := geminiBase(authuser) + "/app"
 	headers := map[string]string{
 		"Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -146,7 +249,7 @@ func fetchAppPage(cookie string, authuser int, proxyURL string) ([]byte, error) 
 
 	var body []byte
 	if proxyURL != "" {
-		req, err := http.NewRequest("GET", pageURL, nil)
+		req, err := http.NewRequestWithContext(ctx, "GET", pageURL, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -171,6 +274,7 @@ func fetchAppPage(cookie string, authuser int, proxyURL string) ([]byte, error) 
 		if err != nil {
 			return nil, err
 		}
+		req = req.WithContext(ctx)
 		for k, v := range headers {
 			req.Header.Set(k, v)
 		}
@@ -190,13 +294,81 @@ func fetchAppPage(cookie string, authuser int, proxyURL string) ([]byte, error) 
 	return body, nil
 }
 
-// fetchAppTokens 抓一次 /app 页面，把三个 token 一起抠出来。
+// Preload enabled sessions after startup without blocking the HTTP listener or
+// generating any model output. Reuses the normal egress limiter and singleflight.
+func warmEnabledAppTokens() {
+	// Large pools must not spend their entire RPM/RPH budget on startup work.
+	// Warm at most four accounts, at most one per egress; the rest load lazily.
+	for _, account := range warmupCandidates(accountList(), listProxies(), 4) {
+		current := accountByID(account.ID)
+		if current == nil || current.Status != "enabled" {
+			continue
+		}
+		account = *current
+		// Warmup is read-only with respect to account routing. Let the real
+		// request bind a new account; never steal another proxy's slot or
+		// silently rebind an existing account as a background side effect.
+		proxies := listProxies()
+		p, routeOK := warmupRoute(account.ProxyID, proxies)
+		if !routeOK {
+			continue
+		}
+		xsrfMu.Lock()
+		e, cached := xsrfCache[xsrfCacheKey(account.Cookie, account.AuthUser, p.URL)]
+		xsrfMu.Unlock()
+		if cached && time.Since(e.fetched) < xsrfTTL {
+			continue
+		}
+		if ok, _ := trySlotAcquire(p.ID); !ok {
+			continue
+		}
+		_, err := getXSRF(account.Cookie, account.AuthUser, p.URL)
+		releaseSlot(p.ID)
+		logf("[xsrf] warmup account=%d proxy=%d ok=%t", account.ID, p.ID, err == nil)
+	}
+}
+
+func warmupCandidates(accounts []CookieAccount, proxies []Proxy, limit int) []CookieAccount {
+	var out []CookieAccount
+	seen := map[int64]bool{}
+	for _, a := range accounts {
+		if len(out) >= limit {
+			break
+		}
+		if a.Status != "enabled" || seen[a.ProxyID] {
+			continue
+		}
+		if _, ok := warmupRoute(a.ProxyID, proxies); !ok {
+			continue
+		}
+		seen[a.ProxyID] = true
+		out = append(out, a)
+	}
+	return out
+}
+
+func warmupRoute(proxyID int64, proxies []Proxy) (Proxy, bool) {
+	if len(proxies) == 0 {
+		return Proxy{}, proxyID == 0
+	}
+	for _, p := range proxies {
+		if p.ID == proxyID && proxyUsable(p, time.Now().Unix(), rtCfg().ProxyCooldownMin) {
+			return p, true
+		}
+	}
+	return Proxy{}, false
+}
+
+// fetchAppTokens 抓一次 /app 页面，共用 XSRF、上传参数和网页文本会话凭据。
 func fetchAppTokens(cookie string, authuser int, proxyURL string) (xsrfEntry, error) {
 	body, err := fetchAppPage(cookie, authuser, proxyURL)
 	if err != nil {
 		return xsrfEntry{}, err
 	}
-	e := xsrfEntry{fetched: time.Now()}
+	e := xsrfEntry{fetched: time.Now(), serverToken: appServerToken(body)}
+	if m := wcKeyRe.FindSubmatch(body); m != nil {
+		e.apiKey = string(m[1])
+	}
 	if m := snlm0eRe.FindSubmatch(body); m != nil {
 		e.token = string(m[1])
 	} else if cookie != "" {
