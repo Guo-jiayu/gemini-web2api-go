@@ -110,6 +110,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     note          TEXT NOT NULL DEFAULT '',
     created_at    INTEGER NOT NULL,
     last_used_at  INTEGER NOT NULL DEFAULT 0,     -- 上次被挑中发请求的时刻
+    pick_seq      INTEGER NOT NULL DEFAULT 0,
     last_ok_at    INTEGER NOT NULL DEFAULT 0,     -- 上次请求成功的时刻
     last_error    TEXT NOT NULL DEFAULT '',
     fail_count    INTEGER NOT NULL DEFAULT 0,     -- 连续失败次数（成功归零）
@@ -185,6 +186,7 @@ func getDB() *dbx {
 		// authuser 列三种库的老库都要补：缺这一列时查账号的 SELECT 整条失败、池子直接空掉。
 		// 这句语法三种库通用，已有该列时报错忽略。
 		_, _ = conn.Exec(`ALTER TABLE accounts ADD COLUMN authuser INTEGER NOT NULL DEFAULT 0`)
+		_, _ = conn.Exec(`ALTER TABLE accounts ADD COLUMN pick_seq INTEGER NOT NULL DEFAULT 0`)
 		db = conn
 		dbw = &dbx{conn}
 		logf("[db] opened dialect=%d driver=%s", curDialect, driver)

@@ -413,8 +413,8 @@ func poolHasCookie(cookie string) bool {
 // 全是方言分支）。挑号只是一次极快的 SELECT+UPDATE，串行化的争用可忽略。
 var pickMu sync.Mutex
 
-// pickCookieAccount 从池里挑一个 enabled 账号，按 last_used_at 最久优先，
-// 挑中后立刻把 last_used_at 记为现在（下次轮到别人）。池空返回 (nil,false)。
+// pickCookieAccount 按健康度和持久化选择序号轮转。秒级 last_used_at
+// 仅用于展示和旧数据的初始排序，避免同秒请求持续命中同一个小 ID。
 func pickCookieAccount() (*CookieAccount, bool) {
 	return pickCookieAccountExcept(nil)
 }
@@ -434,7 +434,7 @@ func pickCookieAccountExcept(skip map[int64]bool) (*CookieAccount, bool) {
 	// 粘性被坏号带偏。实测 1 好 2 坏时出口在两个代理间对半分。
 	rows, err := getDB().Query(
 		`SELECT id, label, cookie, status, note, created_at, last_used_at, last_ok_at, last_error, fail_count, proxy_id, authuser
-		 FROM accounts WHERE status='enabled' ORDER BY fail_count ASC, last_used_at ASC, id ASC`)
+		 FROM accounts WHERE status='enabled' ORDER BY fail_count ASC, pick_seq ASC, last_used_at ASC, id ASC`)
 	if err != nil {
 		return nil, false
 	}
@@ -448,7 +448,17 @@ func pickCookieAccountExcept(skip map[int64]bool) (*CookieAccount, bool) {
 		if skip[a.ID] {
 			continue
 		}
-		_, _ = getDB().Exec(`UPDATE accounts SET last_used_at=? WHERE id=?`, time.Now().Unix(), a.ID)
+		// Close the read cursor before writing (important for SQLite connections).
+		if err := rows.Close(); err != nil {
+			return nil, false
+		}
+		var sequence int64
+		if err := getDB().QueryRow(`SELECT COALESCE(MAX(pick_seq),0)+1 FROM accounts`).Scan(&sequence); err != nil {
+			return nil, false
+		}
+		if _, err := getDB().Exec(`UPDATE accounts SET last_used_at=?, pick_seq=? WHERE id=?`, time.Now().Unix(), sequence, a.ID); err != nil {
+			return nil, false
+		}
 		return &a, true
 	}
 	return nil, false
