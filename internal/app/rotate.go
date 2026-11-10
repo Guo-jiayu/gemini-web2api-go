@@ -93,7 +93,11 @@ func rotateAccount(a CookieAccount) (time.Duration, []string, error) {
 
 	names = uniqueKeepOrder(names)
 	if cookie != a.Cookie {
-		updateAccountCookie(a.ID, cookie)
+		stored, saveErr := updateAccountCookie(a.ID, a.Cookie, cookie)
+		if saveErr != nil {
+			return interval, nil, fmt.Errorf("保活 Cookie 写回失败: %w", saveErr)
+		}
+		cookie = stored
 		// SIDCC/SIDTS rotation preserves the login session and its app tokens.
 		// Rejected XSRF tokens and explicit health checks still invalidate them.
 		if xsrfKey(a.Cookie, a.AuthUser) != xsrfKey(cookie, a.AuthUser) {

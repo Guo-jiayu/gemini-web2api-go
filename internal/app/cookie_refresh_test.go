@@ -1,9 +1,71 @@
 package app
 
 import (
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 )
+
+func TestCookieRefreshPreservesNewerFields(t *testing.T) {
+	original := "SAPISID=stable; __Secure-1PSID=stable; __Secure-1PSIDTS=old; SIDCC=old"
+	id, err := accountAdd("refresh-cas", original, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = accountDelete(id) })
+	if _, err = updateAccountCookie(id, original, mergeSetCookie(original, []string{"__Secure-1PSIDTS=new"})); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := updateAccountCookie(id, original, mergeSetCookie(original, []string{"SIDCC=new", "__Secure-1PSIDTS=late"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cookieValue(stored, "__Secure-1PSIDTS") != "new" || cookieValue(stored, "SIDCC") != "new" {
+		t.Fatal("late response lost newer TS or unrelated CC update")
+	}
+}
+
+func TestCookieRefreshConcurrentUpdates(t *testing.T) {
+	original := "SAPISID=stable; __Secure-1PSID=stable"
+	id, err := accountAdd("refresh-parallel", original, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = accountDelete(id) })
+	var wg sync.WaitGroup
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, err := updateAccountCookie(id, original, mergeSetCookie(original, []string{fmt.Sprintf("field%d=fresh", i)}))
+			if err != nil {
+				t.Error(err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	a := accountByID(id)
+	for i := 0; i < 6; i++ {
+		if cookieValue(a.Cookie, fmt.Sprintf("field%d", i)) != "fresh" {
+			t.Errorf("missing concurrent field %d", i)
+		}
+	}
+}
+
+func TestCookieRefreshDeletedAccountFails(t *testing.T) {
+	original := "SAPISID=stable; __Secure-1PSID=stable"
+	id, err := accountAdd("deleted", original, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := accountDelete(id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := updateAccountCookie(id, original, original+"; SIDCC=new"); err == nil {
+		t.Fatal("missing account must not report persistence success")
+	}
+}
 
 // 服务端几乎每个响应都在刷新 SIDCC / __Secure-1PSIDCC / __Secure-3PSIDCC，
 // 客户端要收下再带回去。一直发旧值会被判定为过期会话——实测号活一两小时就失效。

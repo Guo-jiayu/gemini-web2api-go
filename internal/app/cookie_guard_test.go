@@ -77,19 +77,19 @@ func TestUpdateAccountCookieIdentityGuard(t *testing.T) {
 
 	// 只刷新 SIDCC：身份没变，应该写进去
 	refreshed := "SAPISID=keep; __Secure-1PSID=same; SIDCC=new"
-	updateAccountCookie(id, refreshed)
+	_, _ = updateAccountCookie(id, orig, refreshed)
 	if a := accountByID(id); a == nil || a.Cookie != refreshed {
 		t.Errorf("同身份的刷新应写回, got %+v", a)
 	}
 
 	// 换了 SAPISID：不是同一个账号了，必须丢弃
-	updateAccountCookie(id, "SAPISID=other; __Secure-1PSID=same; SIDCC=x")
+	_, _ = updateAccountCookie(id, refreshed, "SAPISID=other; __Secure-1PSID=same; SIDCC=x")
 	if a := accountByID(id); a == nil || a.Cookie != refreshed {
 		t.Errorf("换了 SAPISID 应丢弃不写, got cookie=%q", a.Cookie)
 	}
 
 	// 换了 __Secure-1PSID：同理
-	updateAccountCookie(id, "SAPISID=keep; __Secure-1PSID=other; SIDCC=x")
+	_, _ = updateAccountCookie(id, refreshed, "SAPISID=keep; __Secure-1PSID=other; SIDCC=x")
 	if a := accountByID(id); a == nil || a.Cookie != refreshed {
 		t.Errorf("换了 __Secure-1PSID 应丢弃不写, got cookie=%q", a.Cookie)
 	}

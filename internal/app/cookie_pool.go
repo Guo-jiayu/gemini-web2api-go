@@ -675,18 +675,47 @@ func cookieIdentity(cookie string) string {
 // 带了另一个账号的 SID），照单全收就等于把 A 号的凭据写进 B 号那一行。之后这个号
 // 在面板上显示的还是原来的标签，实际发出去的却是别人的会话，而且**完全静默**。
 // 身份对不上就不写，宁可让这次刷新白费。
-func updateAccountCookie(id int64, cookie string) {
-	if id <= 0 || cookie == "" {
-		return
+func updateAccountCookie(id int64, original, refreshed string) (string, error) {
+	if id <= 0 || original == "" || refreshed == "" {
+		return "", fmt.Errorf("invalid cookie refresh")
 	}
-	var cur string
-	if err := getDB().QueryRow(`SELECT cookie FROM accounts WHERE id=?`, id).Scan(&cur); err == nil {
-		if got, want := cookieIdentity(cookie), cookieIdentity(cur); got != want {
-			logf("[cookie] 账号 #%d 的刷新结果身份对不上，已丢弃不写回", id)
-			return
+	if cookieIdentity(original) != cookieIdentity(refreshed) {
+		return "", fmt.Errorf("cookie refresh identity mismatch for account #%d", id)
+	}
+	// Only apply changed fields whose stored value still matches the request's
+	// snapshot. A late generation response must not undo a newer rotation.
+	for attempt := 0; attempt < 8; attempt++ {
+		var current string
+		if err := getDB().QueryRow(`SELECT cookie FROM accounts WHERE id=?`, id).Scan(&current); err != nil {
+			return "", err
+		}
+		if cookieIdentity(current) != cookieIdentity(original) {
+			return "", fmt.Errorf("account #%d identity changed during refresh", id)
+		}
+		var updates []string
+		for _, pair := range splitCookiePairs(refreshed) {
+			old := cookieValue(original, pair[0])
+			if pair[1] != old && cookieValue(current, pair[0]) == old {
+				updates = append(updates, pair[0]+"="+pair[1])
+			}
+		}
+		merged := mergeSetCookie(current, updates)
+		if merged == current {
+			return current, nil
+		}
+		result, err := getDB().Exec(`UPDATE accounts SET cookie=? WHERE id=? AND cookie=?`, merged, id, current)
+		if err != nil {
+			return "", err
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return "", err
+		}
+		if n == 1 {
+			return merged, nil
 		}
 	}
-	_, _ = getDB().Exec(`UPDATE accounts SET cookie=? WHERE id=?`, cookie, id)
+	return "", fmt.Errorf("account #%d cookie refresh conflicted repeatedly", id)
 }
 
 // xsrfErrBlamesCookie 判断取 XSRF（抓 /app）失败是不是 cookie 的错。

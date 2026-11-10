@@ -845,8 +845,11 @@ func streamGenerateOnce(prompt, latest string, mc ModelConfig, pending []pending
 		}
 		if len(setCookie) > 0 && cookieID > 0 {
 			if merged := mergeSetCookie(cookieStr, setCookie); merged != cookieStr {
-				cookieStr = merged
-				updateAccountCookie(cookieID, merged)
+				if stored, saveErr := updateAccountCookie(cookieID, cookieStr, merged); saveErr != nil {
+					logf("[cookie] 账号 #%d 刷新写回失败: %v", cookieID, saveErr)
+				} else {
+					cookieStr = stored
+				}
 			}
 		}
 		// A rejected browser token is not proof that the login Cookie expired.
