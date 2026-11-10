@@ -146,6 +146,16 @@ func TestRotationFailureBackoff(t *testing.T) {
 	}
 }
 
+func TestRotationDeadlineDoesNotShortenRetryAfter(t *testing.T) {
+	for _, nano := range []int64{0, 1, 123456789, 999999999} {
+		now := time.Unix(1800000000, nano)
+		deadline := time.Unix(rotationDeadline(now, 10*time.Minute), 0)
+		if deadline.Before(now.Add(10*time.Minute)) || deadline.Sub(now.Add(10*time.Minute)) >= time.Second {
+			t.Fatalf("deadline rounds incorrectly for nanoseconds=%d", nano)
+		}
+	}
+}
+
 type rotationTestTransport func(*http.Request) (*http.Response, error)
 
 func (f rotationTestTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

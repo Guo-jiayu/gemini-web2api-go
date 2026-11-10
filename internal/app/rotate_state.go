@@ -95,7 +95,9 @@ func finishRotation(id int64, token string, previous rotationState, wait time.Du
 		failures = previous.Failures + 1
 		detail = truncate(refreshErr.Error(), 450)
 	}
-	result, err := getDB().Exec(`UPDATE account_rotations SET last_success=?,next_attempt=?,lease_until=0,lease_token='',failures=?,last_error=? WHERE account_id=? AND lease_token=?`, success, now.Add(wait).Unix(), failures, detail, id, token)
+	// Stored deadlines have second precision. Round up so Retry-After is never
+	// shortened by truncating the fractional part of the response timestamp.
+	result, err := getDB().Exec(`UPDATE account_rotations SET last_success=?,next_attempt=?,lease_until=0,lease_token='',failures=?,last_error=? WHERE account_id=? AND lease_token=?`, success, rotationDeadline(now, wait), failures, detail, id, token)
 	if err != nil {
 		return err
 	}
@@ -107,6 +109,10 @@ func finishRotation(id int64, token string, previous rotationState, wait time.Du
 		return fmt.Errorf("account #%d rotation lease lost", id)
 	}
 	return nil
+}
+
+func rotationDeadline(now time.Time, wait time.Duration) int64 {
+	return now.Add(wait).Add(time.Second - time.Nanosecond).Unix()
 }
 
 func rotationFailureWait(previous rotationState, err error) time.Duration {
