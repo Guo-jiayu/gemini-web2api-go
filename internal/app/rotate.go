@@ -1,6 +1,8 @@
 package app
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -42,8 +44,49 @@ const (
 	// 哨兵 payload。前导零是故意的，见文件头。
 	rotate1PSIDTSBody = `[000,"-0000000000000000000"]`
 	// 打太勤会 429。Gemini-API / notebooklm-py 都用 60 秒地板。
-	min1PSIDTSInterval = 60 * time.Second
+	min1PSIDTSInterval   = 60 * time.Second
+	rotateRequestTimeout = 30 * time.Second
 )
+
+type rotationHTTPError struct {
+	Status     int
+	RetryAfter time.Duration
+}
+
+func (e *rotationHTTPError) Error() string {
+	return fmt.Sprintf("RotateCookies 返回 HTTP %d（下次尝试不早于 %s）", e.Status, e.RetryAfter)
+}
+
+func rotationRetryAfter(header string, body []byte, now time.Time) time.Duration {
+	wait := defaultRotateInterval
+	if seconds, err := strconv.ParseInt(header, 10, 64); err == nil && seconds > 0 && seconds <= int64((365*24*time.Hour)/time.Second) {
+		if d := time.Duration(seconds) * time.Second; d > wait {
+			wait = d
+		}
+	} else if at, err := http.ParseTime(header); err == nil && at.Sub(now) > wait {
+		wait = at.Sub(now)
+	}
+	payload := strings.TrimSpace(string(body))
+	if strings.HasPrefix(payload, ")]}'") {
+		payload = strings.TrimSpace(payload[4:])
+	}
+	var rows [][]json.RawMessage
+	if json.Unmarshal([]byte(payload), &rows) == nil {
+		for _, row := range rows {
+			if len(row) < 2 {
+				continue
+			}
+			var tag string
+			var seconds float64
+			if json.Unmarshal(row[0], &tag) == nil && tag == "identity.hfcr" && json.Unmarshal(row[1], &seconds) == nil && seconds >= 60 && seconds <= 86400 {
+				if d := time.Duration(seconds * float64(time.Second)); d > wait {
+					wait = d
+				}
+			}
+		}
+	}
+	return wait
+}
 
 // 刷新 1PSIDTS 只带这一对。多带实测会 401。
 var rotate1PSIDTSCookies = []string{"__Secure-1PSID", "__Secure-1PSIDTS"}
@@ -71,24 +114,22 @@ func rotateAccount(a CookieAccount) (time.Duration, []string, error) {
 	interval := defaultRotateInterval
 
 	c2, n, err := tryRotate1PSIDTS(a.ID, cookie, proxyURL)
+	cookie = c2
+	names = append(names, n...)
 	if err != nil {
 		psidtsErr = err
 		logf("[rotate] 账号 #%d 刷新 1PSIDTS 失败: %v", a.ID, err)
-	} else {
-		cookie = c2
-		names = append(names, n...)
 	}
 
 	c3, iv, n2, err := rotateSIDCC(cookie, proxyURL)
+	cookie = c3
+	names = append(names, n2...)
+	if iv > 0 {
+		interval = iv
+	}
 	if err != nil {
 		sidccErr = err
 		logf("[rotate] 账号 #%d SIDCC 保活失败: %v", a.ID, err)
-	} else {
-		cookie = c3
-		names = append(names, n2...)
-		if iv > 0 {
-			interval = iv
-		}
 	}
 
 	names = uniqueKeepOrder(names)
@@ -132,7 +173,7 @@ func tryRotate1PSIDTS(id int64, cookie, proxyURL string) (string, []string, erro
 	c2, names, err := rotate1PSIDTS(cookie, proxyURL)
 	note1PSIDTSAttempt(id, err)
 	if err != nil {
-		return cookie, nil, err
+		return c2, names, err
 	}
 	return c2, names, nil
 }
@@ -181,8 +222,13 @@ func rotate1PSIDTS(cookie, proxyURL string) (string, []string, error) {
 		"Sec-Fetch-Site": "same-origin",
 	}
 	status, setCookie, respBody, err := rotatePost(rotatePostURL, headers, []byte(rotate1PSIDTSBody), proxyURL)
+	merged, names := cookie, []string(nil)
+	if status == 200 || status == 429 {
+		merged = mergeSetCookie(cookie, setCookie)
+		names = setCookieNames(setCookie)
+	}
 	if err != nil {
-		return cookie, nil, err
+		return merged, names, err
 	}
 	if status == 401 || status == 403 {
 		return cookie, nil, fmt.Errorf("RotateCookies 1PSIDTS 返回 HTTP %d（Chrome 导出的 cookie 可能受设备绑定限制，建议用 Firefox 重新导出）: %s",
@@ -191,30 +237,38 @@ func rotate1PSIDTS(cookie, proxyURL string) (string, []string, error) {
 	if status != 200 {
 		return cookie, nil, fmt.Errorf("RotateCookies 1PSIDTS 返回 HTTP %d: %s", status, truncate(string(respBody), 120))
 	}
-	merged := mergeSetCookie(cookie, setCookie)
-	return merged, setCookieNames(setCookie), nil
+	if cookieValue(merged, "__Secure-1PSIDTS") == "" || cookieValue(merged, "__Secure-1PSIDTS") == cookieValue(cookie, "__Secure-1PSIDTS") {
+		return merged, names, fmt.Errorf("RotateCookies HTTP 200 未换发新的 1PSIDTS")
+	}
+	return merged, names, nil
 }
 
 // rotateSIDCC 走浏览器 iframe 那条：GET 轮转页拿会话 id，再 POST [658, id]。
 func rotateSIDCC(cookie, proxyURL string) (string, time.Duration, []string, error) {
 	id, interval, pageSet, err := fetchRotateParams(cookie, proxyURL)
-	if err != nil {
-		return cookie, 0, nil, err
-	}
 	cookie = mergeSetCookie(cookie, pageSet)
+	names := setCookieNames(pageSet)
+	if err != nil {
+		return cookie, interval, names, err
+	}
 
 	body := fmt.Sprintf(`[%d,"%s"]`, rotateProductID, id)
 	headers := rotatePostHeaders()
 	headers["Cookie"] = cookie
 	status, setCookie, respBody, err := rotatePost(rotatePostURL, headers, []byte(body), proxyURL)
+	if status == 200 || status == 429 {
+		cookie = mergeSetCookie(cookie, setCookie)
+		names = uniqueKeepOrder(append(names, setCookieNames(setCookie)...))
+	}
 	if err != nil {
-		return cookie, 0, nil, err
+		if e, ok := err.(*rotationHTTPError); ok && e.RetryAfter > interval {
+			interval = e.RetryAfter
+		}
+		return cookie, interval, names, err
 	}
 	if status != 200 {
-		return cookie, 0, nil, fmt.Errorf("RotateCookies 返回 HTTP %d: %s", status, truncate(string(respBody), 120))
+		return cookie, interval, names, fmt.Errorf("RotateCookies 返回 HTTP %d: %s", status, truncate(string(respBody), 120))
 	}
-	cookie = mergeSetCookie(cookie, setCookie)
-	names := setCookieNames(append(append([]string{}, pageSet...), setCookie...))
 	return cookie, interval, names, nil
 }
 
@@ -263,7 +317,7 @@ func fetchRotateParams(cookie, proxyURL string) (string, time.Duration, []string
 	m := rotateInitRe.FindSubmatch(body)
 	if m == nil {
 		// 页面拿到了却没有 init(...)，最可能是 cookie 已失效跳到了登录页。
-		return "", 0, nil, fmt.Errorf("轮转页里没有 init(...)（cookie 可能已失效）")
+		return "", defaultRotateInterval, setCookie, fmt.Errorf("轮转页里没有 init(...)（cookie 可能已失效）")
 	}
 	id := string(m[1])
 	interval := defaultRotateInterval
@@ -322,6 +376,8 @@ func rotatePost(url string, headers map[string]string, body []byte, proxyURL str
 // 连 User-Agent 都不发 —— 同一个账号在上游看来会因为走没走代理而呈现两种客户端。
 func rotateDo(method, url string, headers map[string]string, body []byte, proxyURL string) (
 	int, []string, []byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), rotateRequestTimeout)
+	defer cancel()
 	var rdr io.Reader
 	if body != nil {
 		rdr = strings.NewReader(string(body))
@@ -339,7 +395,7 @@ func rotateDo(method, url string, headers map[string]string, body []byte, proxyU
 		merged[k] = v
 	}
 	if proxyURL != "" {
-		req, err := http.NewRequest(method, url, rdr)
+		req, err := http.NewRequestWithContext(ctx, method, url, rdr)
 		if err != nil {
 			return 0, nil, nil, err
 		}
@@ -351,10 +407,13 @@ func rotateDo(method, url string, headers map[string]string, body []byte, proxyU
 			return 0, nil, nil, err
 		}
 		defer resp.Body.Close()
-		b, err := io.ReadAll(resp.Body)
+		b, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		if resp.StatusCode == 429 {
+			err = &rotationHTTPError{Status: 429, RetryAfter: rotationRetryAfter(resp.Header.Get("Retry-After"), b, time.Now())}
+		}
 		return resp.StatusCode, resp.Header.Values("Set-Cookie"), b, err
 	}
-	req, err := fhttp.NewRequest(method, url, rdr)
+	req, err := fhttp.NewRequestWithContext(ctx, method, url, rdr)
 	if err != nil {
 		return 0, nil, nil, err
 	}
@@ -366,7 +425,10 @@ func rotateDo(method, url string, headers map[string]string, body []byte, proxyU
 		return 0, nil, nil, err
 	}
 	defer resp.Body.Close()
-	b, err := io.ReadAll(resp.Body)
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode == 429 {
+		err = &rotationHTTPError{Status: 429, RetryAfter: rotationRetryAfter(resp.Header.Get("Retry-After"), b, time.Now())}
+	}
 	return resp.StatusCode, resp.Header.Values("Set-Cookie"), b, err
 }
 
