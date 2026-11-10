@@ -85,12 +85,15 @@ def request(name, prompt, expected=None):
         row['expected'] = expected
         row['ok'] = row['transport_complete'] and all(row['recall'].values())
     else:
-        sections = re.findall(r'^SECTION_(\d{2})\s*$', text, flags=re.M)
+        sections = re.findall(r'^SECTION_(\d{2})(?:[^\S\r\n][^\r\n]*)?$', text, flags=re.M)
+        bodies = re.split(r'^SECTION_\d{2}(?:[^\S\r\n][^\r\n]*)?$', text, flags=re.M)[1:]
+        row['min_section_chinese_chars'] = min((len(re.findall(r'[\u4e00-\u9fff]', body)) for body in bodies), default=0)
         row['section_count'] = len(sections)
         row['section_order_ok'] = sections == [f'{i:02d}' for i in range(1, 61)]
         row['end_marker'] = text.rstrip().endswith('LONG_OUTPUT_END')
         row['length_met'] = row['output_chinese_chars'] >= 10000
-        row['ok'] = row['transport_complete'] and row['section_order_ok'] and row['end_marker'] and row['length_met']
+        row['ok'] = (row['transport_complete'] and row['section_order_ok'] and row['end_marker']
+                     and row['length_met'] and row['min_section_chinese_chars'] >= 180)
     results.append(row)
     save('results.json', results)
     emit(row)
