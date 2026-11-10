@@ -543,7 +543,7 @@ func streamGenerateOnce(prompt, latest string, mc ModelConfig, pending []pending
 		// 轮转会换发 __Secure-1PSIDTS（约 30 分钟过期的那张票）并合并 *SIDCC。
 		// 只是票过期、持久身份还在的号，这一步能救回来；救不回来再换号。
 		// 只试一次，且只在这一轮。
-		if !rotatedOnce[acct.ID] {
+		if xsrfErrBlamesCookie(err) && !rotatedOnce[acct.ID] {
 			rotatedOnce[acct.ID] = true
 			if _, _, rerr := rotateAccount(*acct); rerr == nil {
 				if fresh := accountByID(acct.ID); fresh != nil {

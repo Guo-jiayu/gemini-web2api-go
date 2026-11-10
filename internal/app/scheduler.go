@@ -12,6 +12,13 @@ import (
 //  4. proxy cache reload: every 60s pull proxies from DB
 func startScheduler() {
 	go func() {
+		timer := time.NewTimer(firstRotateDelay)
+		defer timer.Stop()
+		for range timer.C {
+			timer.Reset(rotateAllAccounts())
+		}
+	}()
+	go func() {
 		// On boot: catch up any aggregations missed while service was down.
 		aggregateHourlyCatchup()
 		aggregateDailyCatchup()
@@ -21,14 +28,10 @@ func startScheduler() {
 		daily := time.NewTicker(1 * time.Hour)
 		retention := time.NewTicker(6 * time.Hour)
 		proxyReload := time.NewTicker(60 * time.Second)
-		// 会话保活：启动后先尽快刷一次 1PSIDTS（导入的票可能已经快到期），
-		// 之后按服务端在轮转页里指定的间隔走（实测 600 秒）。
-		rotate := time.NewTimer(firstRotateDelay)
 		defer hourly.Stop()
 		defer daily.Stop()
 		defer retention.Stop()
 		defer proxyReload.Stop()
-		defer rotate.Stop()
 
 		for {
 			select {
@@ -40,8 +43,6 @@ func startScheduler() {
 				retentionSweep()
 			case <-proxyReload.C:
 				loadProxies()
-			case <-rotate.C:
-				rotate.Reset(rotateAllAccounts())
 			}
 		}
 	}()

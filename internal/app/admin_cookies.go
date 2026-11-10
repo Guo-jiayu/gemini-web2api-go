@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -51,7 +52,9 @@ func cookieAcctView(a CookieAccount) map[string]interface{} {
 	case a.LastOkAt == 0:
 		health = "unknown"
 	}
+	rotation, _ := loadRotationState(a.ID)
 	return map[string]interface{}{
+		"keepalive":    rotation,
 		"id":           a.ID,
 		"label":        a.Label,
 		"status":       a.Status,
@@ -156,6 +159,12 @@ func handleAdminCookieItem(w http.ResponseWriter, r *http.Request) {
 			for _, a := range accountList() {
 				if a.ID == id {
 					iv, names, err := rotateAccount(a)
+					var deferred *rotationDeferredError
+					if errors.As(err, &deferred) {
+						state, _ := loadRotationState(a.ID)
+						writeJSON(w, 200, map[string]interface{}{"ok": state.LastSuccess > 0 && state.LastError == "", "deferred": true, "detail": deferred.Error(), "next_sec": int(iv.Seconds()) + 1, "keepalive": state})
+						return
+					}
 					if err != nil {
 						writeJSON(w, 200, map[string]interface{}{"ok": false, "detail": err.Error()})
 						return

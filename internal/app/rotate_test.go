@@ -2,7 +2,6 @@ package app
 
 import (
 	"encoding/json"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -68,43 +67,6 @@ func TestMergeSetCookieRefreshes1PSIDTS(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("丢了 %q: %s", want, got)
 		}
-	}
-}
-
-func TestAllow1PSIDTSRotateThrottle(t *testing.T) {
-	const id int64 = -42
-	defer func() {
-		psidtsMu.Lock()
-		delete(psidtsLastAt, id)
-		psidtsMu.Unlock()
-	}()
-	if ok, _ := allow1PSIDTSRotate(id); !ok {
-		t.Fatal("第一次应该放行")
-	}
-	note1PSIDTSAttempt(id, nil)
-	ok, wait := allow1PSIDTSRotate(id)
-	if ok {
-		t.Fatal("60s 内应拦截")
-	}
-	if wait <= 0 || wait > min1PSIDTSInterval {
-		t.Fatalf("wait=%s", wait)
-	}
-}
-
-func TestNote1PSIDTSAttemptSkipsNetworkError(t *testing.T) {
-	const id int64 = -43
-	defer func() {
-		psidtsMu.Lock()
-		delete(psidtsLastAt, id)
-		psidtsMu.Unlock()
-	}()
-	note1PSIDTSAttempt(id, fmt.Errorf("dial tcp timeout"))
-	if ok, _ := allow1PSIDTSRotate(id); !ok {
-		t.Fatal("网络错误不该记节流")
-	}
-	note1PSIDTSAttempt(id, fmt.Errorf("RotateCookies 1PSIDTS 返回 HTTP 401（x）"))
-	if ok, _ := allow1PSIDTSRotate(id); ok {
-		t.Fatal("401 应该记节流")
 	}
 }
 

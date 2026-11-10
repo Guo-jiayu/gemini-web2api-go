@@ -3,33 +3,21 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	fhttp "github.com/bogdanfinn/fhttp"
 )
 
-// 会话保活。同一条 POST /RotateCookies 有两种 payload，刷的不是同一族 cookie：
-//
-//  1. 哨兵 `[000,"-0000000000000000000"]`：无条件换发 `__Secure-1PSIDTS` /
-//     `__Secure-3PSIDTS`。这是登录态真正的短命票（约 30 分钟），不刷就会被
-//     当匿名。payload 必须是这串 JSPB（前导零合法、严格 JSON 非法），
-//     json.Marshal 会变成 `[0,"…"]`，服务端不认。
-//
-//  2. 浏览器 iframe 那条：先 GET RotateCookiesPage 拿会话 id，再 POST
-//     `[658,"<id>"]`。只刷新 SIDCC / `__Secure-1PSIDCC` / `__Secure-3PSIDCC`，
-//     间隔由页面 init(...) 最后一个参数给出（实测 600 秒）。
-//
-// 以前只做了第 2 条，所以号大概半小时就死（issue #6）。Chrome 新版本还有
-// DBSC 设备绑定（GET /RotateBoundCookies + 签名 JWT），那条我们复刻不了；
-// 哨兵这条对 Firefox 导出、以及未绑定设备的会话有效。Chrome 导出的号如果
-// 反复 401，换 Firefox 重新登录再导出。
+// 会话保活优先使用哨兵刷新 TS（响应也可能包含 CC），不再紧接着发送
+// 第二条 RotateCookies POST。仅缺少 1PSID 的旧凭证使用 iframe 路径。
+// 账号级租约、下次尝试时间和结果持久化在 account_rotations 中。
 
 const (
 	rotatePageURL = "https://accounts.google.com/RotateCookiesPage" +
@@ -91,120 +79,80 @@ func rotationRetryAfter(header string, body []byte, now time.Time) time.Duration
 // 刷新 1PSIDTS 只带这一对。多带实测会 401。
 var rotate1PSIDTSCookies = []string{"__Secure-1PSID", "__Secure-1PSIDTS"}
 
-var (
-	psidtsMu     sync.Mutex
-	psidtsLastAt = map[int64]time.Time{}
-)
-
 // 页面里形如：init('4162200486104360679', 658.0, 0.0, 0.0, 600.0)
 // 第一个参数是这个会话的标识，最后一个是下次轮转的间隔秒数。
 var rotateInitRe = regexp.MustCompile(`init\('([^']{4,64})'\s*,\s*([0-9.]+)\s*,[^)]*?([0-9.]+)\s*\)`)
 
-// rotateAccount 给一个账号做一次保活：先刷 1PSIDTS，再刷 SIDCC。
-// 返回服务端建议的下次间隔，以及这一轮实际刷新的 cookie 名。
+// rotateAccount is the shared entry point for scheduled, admin and recovery
+// refreshes. Claim before any network operation and re-read the latest cookie.
 func rotateAccount(a CookieAccount) (time.Duration, []string, error) {
-	proxyURL := ""
-	if a.ProxyID > 0 {
-		proxyURL = proxyURLByID(a.ProxyID)
+	state, token, err := claimRotation(a.ID)
+	if err != nil {
+		var deferred *rotationDeferredError
+		if errors.As(err, &deferred) {
+			return deferred.Wait, nil, err
+		}
+		return min1PSIDTSInterval, nil, err
 	}
-
-	cookie := a.Cookie
-	var names []string
-	var psidtsErr, sidccErr error
 	interval := defaultRotateInterval
-
-	c2, n, err := tryRotate1PSIDTS(a.ID, cookie, proxyURL)
-	cookie = c2
-	names = append(names, n...)
-	if err != nil {
-		psidtsErr = err
-		logf("[rotate] 账号 #%d 刷新 1PSIDTS 失败: %v", a.ID, err)
-	}
-
-	c3, iv, n2, err := rotateSIDCC(cookie, proxyURL)
-	cookie = c3
-	names = append(names, n2...)
-	if iv > 0 {
-		interval = iv
-	}
-	if err != nil {
-		sidccErr = err
-		logf("[rotate] 账号 #%d SIDCC 保活失败: %v", a.ID, err)
-	}
-
-	names = uniqueKeepOrder(names)
-	if cookie != a.Cookie {
-		stored, saveErr := updateAccountCookie(a.ID, a.Cookie, cookie)
-		if saveErr != nil {
-			return interval, nil, fmt.Errorf("保活 Cookie 写回失败: %w", saveErr)
+	var names []string
+	fresh := accountByID(a.ID)
+	if fresh == nil {
+		err = fmt.Errorf("account #%d no longer exists", a.ID)
+	} else {
+		a = *fresh
+		proxyURL := ""
+		if a.ProxyID > 0 {
+			proxyURL = proxyURLByID(a.ProxyID)
 		}
-		cookie = stored
-		// SIDCC/SIDTS rotation preserves the login session and its app tokens.
-		// Rejected XSRF tokens and explicit health checks still invalidate them.
-		if xsrfKey(a.Cookie, a.AuthUser) != xsrfKey(cookie, a.AuthUser) {
-			invalidateXSRF(a.Cookie)
+		cookie := a.Cookie
+		if a.ProxyID > 0 && proxyURL == "" {
+			err = fmt.Errorf("account #%d bound proxy is unavailable", a.ID)
+		} else if cookieValue(cookie, "__Secure-1PSID") != "" {
+			cookie, names, err = rotate1PSIDTS(cookie, proxyURL)
+		} else {
+			cookie, interval, names, err = rotateSIDCC(cookie, proxyURL)
 		}
+		if cookie != a.Cookie {
+			stored, saveErr := updateAccountCookie(a.ID, a.Cookie, cookie)
+			if saveErr != nil {
+				err = errors.Join(err, fmt.Errorf("保活 Cookie 写回失败: %w", saveErr))
+				names = nil
+			} else {
+				actual := []string{}
+				for _, name := range uniqueKeepOrder(names) {
+					if cookieValue(stored, name) != cookieValue(a.Cookie, name) {
+						actual = append(actual, name)
+					}
+				}
+				names = actual
+				if xsrfKey(a.Cookie, a.AuthUser) != xsrfKey(stored, a.AuthUser) {
+					invalidateXSRF(a.Cookie)
+				}
+			}
+		} else {
+			names = nil
+		}
+		if err == nil && len(names) == 0 {
+			err = fmt.Errorf("保活未取得有效的新 Cookie")
+		}
+	}
+	if err != nil {
+		backoff := rotationFailureWait(state, err)
+		if interval <= defaultRotateInterval || backoff > interval {
+			interval = backoff
+		}
+	}
+	if interval < min1PSIDTSInterval {
+		interval = min1PSIDTSInterval
+	}
+	if saveErr := finishRotation(a.ID, token, state, interval, err); saveErr != nil {
+		return interval, names, errors.Join(err, saveErr)
 	}
 	if len(names) > 0 {
-		logf("[rotate] 账号 #%d 刷新了 %s", a.ID, strings.Join(names, ", "))
+		logf("[rotate] 账号 #%d 已保存 %s；下次检查 %s 后", a.ID, strings.Join(names, ", "), interval.Round(time.Second))
 	}
-	// 两条路都失败才算失败。1PSIDTS 刷到了但 iframe 页没 init，仍然是续命成功。
-	if cookie == a.Cookie && len(names) == 0 {
-		if psidtsErr != nil {
-			return 0, nil, psidtsErr
-		}
-		if sidccErr != nil {
-			return 0, nil, sidccErr
-		}
-	}
-	return interval, names, nil
-}
-
-// tryRotate1PSIDTS 用哨兵 payload 换发 1PSIDTS。没 __Secure-1PSID 或距上次不足
-// 60 秒就跳过（不算失败）。
-func tryRotate1PSIDTS(id int64, cookie, proxyURL string) (string, []string, error) {
-	if cookieValue(cookie, "__Secure-1PSID") == "" {
-		return cookie, nil, nil
-	}
-	if ok, _ := allow1PSIDTSRotate(id); !ok {
-		logf("[rotate] 账号 #%d 跳过 1PSIDTS 刷新（距上次不足 %s，避免 429）", id, min1PSIDTSInterval)
-		return cookie, nil, nil
-	}
-	c2, names, err := rotate1PSIDTS(cookie, proxyURL)
-	note1PSIDTSAttempt(id, err)
-	if err != nil {
-		return c2, names, err
-	}
-	return c2, names, nil
-}
-
-func allow1PSIDTSRotate(id int64) (bool, time.Duration) {
-	psidtsMu.Lock()
-	defer psidtsMu.Unlock()
-	last := psidtsLastAt[id]
-	if last.IsZero() {
-		return true, 0
-	}
-	elapsed := time.Since(last)
-	if elapsed >= min1PSIDTSInterval {
-		return true, 0
-	}
-	return false, min1PSIDTSInterval - elapsed
-}
-
-func note1PSIDTSAttempt(id int64, err error) {
-	// 成功、401/403、429 都记时间，避免紧接着再打。网络错误不记，允许立刻重试。
-	if err != nil {
-		msg := err.Error()
-		if !strings.Contains(msg, "HTTP 401") &&
-			!strings.Contains(msg, "HTTP 403") &&
-			!strings.Contains(msg, "HTTP 429") {
-			return
-		}
-	}
-	psidtsMu.Lock()
-	psidtsLastAt[id] = time.Now()
-	psidtsMu.Unlock()
+	return interval, names, err
 }
 
 // rotate1PSIDTS POST 哨兵 payload，把响应里的 Set-Cookie 合并回完整 cookie 串。
@@ -221,7 +169,7 @@ func rotate1PSIDTS(cookie, proxyURL string) (string, []string, error) {
 		"Sec-Fetch-Mode": "cors",
 		"Sec-Fetch-Site": "same-origin",
 	}
-	status, setCookie, respBody, err := rotatePost(rotatePostURL, headers, []byte(rotate1PSIDTSBody), proxyURL)
+	status, setCookie, _, err := rotatePost(rotatePostURL, headers, []byte(rotate1PSIDTSBody), proxyURL)
 	merged, names := cookie, []string(nil)
 	if status == 200 || status == 429 {
 		merged = mergeSetCookie(cookie, setCookie)
@@ -230,12 +178,8 @@ func rotate1PSIDTS(cookie, proxyURL string) (string, []string, error) {
 	if err != nil {
 		return merged, names, err
 	}
-	if status == 401 || status == 403 {
-		return cookie, nil, fmt.Errorf("RotateCookies 1PSIDTS 返回 HTTP %d（Chrome 导出的 cookie 可能受设备绑定限制，建议用 Firefox 重新导出）: %s",
-			status, truncate(string(respBody), 120))
-	}
 	if status != 200 {
-		return cookie, nil, fmt.Errorf("RotateCookies 1PSIDTS 返回 HTTP %d: %s", status, truncate(string(respBody), 120))
+		return cookie, nil, &rotationHTTPError{Status: status, RetryAfter: defaultRotateInterval}
 	}
 	if cookieValue(merged, "__Secure-1PSIDTS") == "" || cookieValue(merged, "__Secure-1PSIDTS") == cookieValue(cookie, "__Secure-1PSIDTS") {
 		return merged, names, fmt.Errorf("RotateCookies HTTP 200 未换发新的 1PSIDTS")
@@ -444,10 +388,12 @@ func rotateAllAccounts() time.Duration {
 		}
 		iv, _, err := rotateAccount(a)
 		if err != nil {
-			logf("[rotate] 账号 #%d 保活失败: %v", a.ID, err)
-			continue
+			var deferred *rotationDeferredError
+			if !errors.As(err, &deferred) {
+				logf("[rotate] 账号 #%d 保活失败: %v", a.ID, err)
+			}
 		}
-		if iv > 0 {
+		if iv > 0 && iv < next {
 			next = iv
 		}
 	}

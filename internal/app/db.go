@@ -117,6 +117,17 @@ CREATE TABLE IF NOT EXISTS accounts (
     authuser      INTEGER NOT NULL DEFAULT 0      -- 浏览器多号登录时的账号序号（/u/N），0 = 默认号
 );
 CREATE INDEX IF NOT EXISTS idx_accounts_pick ON accounts(status, last_used_at);
+
+CREATE TABLE IF NOT EXISTS account_rotations (
+    account_id INTEGER PRIMARY KEY,
+    last_attempt INTEGER NOT NULL DEFAULT 0,
+    last_success INTEGER NOT NULL DEFAULT 0,
+    next_attempt INTEGER NOT NULL DEFAULT 0,
+    lease_until INTEGER NOT NULL DEFAULT 0,
+    lease_token TEXT NOT NULL DEFAULT '',
+    failures INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT NOT NULL DEFAULT ''
+);
 `
 
 func getDB() *dbx {
