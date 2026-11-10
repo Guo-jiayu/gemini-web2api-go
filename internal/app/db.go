@@ -129,6 +129,14 @@ CREATE TABLE IF NOT EXISTS account_rotations (
     failures INTEGER NOT NULL DEFAULT 0,
     last_error TEXT NOT NULL DEFAULT ''
 );
+
+CREATE TABLE IF NOT EXISTS egress_backoff (
+    proxy_id INTEGER PRIMARY KEY,
+    blocked_until INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    failures INTEGER NOT NULL,
+    reason TEXT NOT NULL
+);
 `
 
 func getDB() *dbx {

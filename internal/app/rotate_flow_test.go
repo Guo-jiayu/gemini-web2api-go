@@ -171,7 +171,7 @@ func rotationTestClient(t *testing.T, f rotationTestTransport) string {
 	p := "http://rotation-test.invalid:12345"
 	withTestProxySlot(t, Proxy{ID: 998123, URL: p, Enabled: true}, func(c *RuntimeConfig) { c.RequestTimeout = 2 })
 	key := fmt.Sprintf("%s|%d", p, rtCfg().RequestTimeout)
-	stdlibClientCache.Store(key, &http.Client{Transport: f})
+	stdlibClientCache.Store(key, &http.Client{Transport: f, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }})
 	t.Cleanup(func() { stdlibClientCache.Delete(key) })
 	return p
 }

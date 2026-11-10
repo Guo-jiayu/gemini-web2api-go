@@ -314,10 +314,7 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		mde, downgraded := err.(*ModelDowngradedError)
-		status := 502
-		if downgraded {
-			status = 429
-		}
+		status := callErrorStatus(err)
 		recordRequest("chat.completions", modelName, prompt, "", res, status, err.Error(), stream)
 		if sse != nil && sse.Started() {
 			sse.Fail(err) // 已经开流，HTTP 状态码改不了了
@@ -336,11 +333,7 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if rle, ok := err.(*RateLimitError); ok {
-			writeJSON(w, 429, map[string]interface{}{"error": map[string]string{
-				"message": rle.Error(),
-				"type":    "rate_limit_exceeded",
-				"code":    "ip_slot_full",
-			}})
+			writeRateLimitError(w, rle)
 			return
 		}
 		writeJSON(w, 502, map[string]interface{}{"error": map[string]string{"message": "upstream error: " + err.Error()}})
@@ -693,13 +686,10 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		mde, downgraded := err.(*ModelDowngradedError)
-		status := 502
-		if downgraded {
-			status = 429
-		}
+		status := callErrorStatus(err)
 		recordRequest("responses", modelName, prompt, "", res, status, err.Error(), stream)
 		if stream {
-			errObj := map[string]string{"message": err.Error()}
+			errObj := callErrorDetails(err)
 			if downgraded {
 				errObj["code"] = "model_downgraded"
 			}
@@ -728,11 +718,7 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if rle, ok := err.(*RateLimitError); ok {
-			writeJSON(w, 429, map[string]interface{}{"error": map[string]string{
-				"message": rle.Error(),
-				"type":    "rate_limit_exceeded",
-				"code":    "ip_slot_full",
-			}})
+			writeRateLimitError(w, rle)
 			return
 		}
 		writeJSON(w, 502, map[string]interface{}{"error": map[string]string{"message": "upstream error: " + err.Error()}})

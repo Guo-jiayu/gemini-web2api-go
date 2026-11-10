@@ -280,11 +280,15 @@ type StreamResult struct {
 // RateLimitError 表示所有 IP slot 都达到了限流上限。
 // HTTP handler 看到这个错时返回 429 给客户端。
 type RateLimitError struct {
-	Reason  string // "concurrent" / "rpm" / "rph"
-	ProxyID int64  // 0 = 直连 slot 满
+	Reason     string // "concurrent" / "rpm" / "rph"
+	ProxyID    int64  // 0 = 直连 slot 满
+	RetryAfter time.Duration
 }
 
 func (e *RateLimitError) Error() string {
+	if strings.HasPrefix(e.Reason, "egress_") {
+		return egressErrorMessage(e)
+	}
 	if e.ProxyID == 0 {
 		return "direct IP slot full: " + e.Reason + " limit reached (configure proxies to scale)"
 	}
@@ -305,11 +309,14 @@ func acquireSlot(preferProxyID int64) (Proxy, bool, error) {
 	if hasProxies {
 		if p, ok, reason := pickProxyPreferring(preferProxyID); ok {
 			return p, true, nil
+		} else if strings.HasPrefix(reason, "egress_") {
+			// A risk cooldown is not an outage: never bypass it via direct fallback.
+			return Proxy{}, false, slotLimitError(reason, -1)
 		} else if !rtCfg().FallbackDirect {
 			if reason == "unavailable" {
 				return Proxy{}, false, fmt.Errorf("proxy_unavailable: all configured proxies are disabled or in circuit-breaker cooldown")
 			}
-			return Proxy{}, false, &RateLimitError{Reason: reason, ProxyID: -1}
+			return Proxy{}, false, slotLimitError(reason, -1)
 		}
 		// 代理池里有代理但一个都用不上（限流满 / 全禁用 / 全熔断且没过冷却）。
 		// 默认**不退回直连** —— 配了代理池就意味着不想让上游看到本机 IP，
@@ -319,7 +326,7 @@ func acquireSlot(preferProxyID int64) (Proxy, bool, error) {
 			logf("[proxy] 代理池无可用出口，本次退回直连（fallback_direct 已开）")
 			return Proxy{}, true, nil
 		} else {
-			return Proxy{}, false, &RateLimitError{Reason: reason, ProxyID: 0}
+			return Proxy{}, false, slotLimitError(reason, 0)
 		}
 	}
 
@@ -327,7 +334,7 @@ func acquireSlot(preferProxyID int64) (Proxy, bool, error) {
 	if ok, reason := trySlotAcquire(0); ok {
 		return Proxy{}, true, nil // ProxyID=0 表示直连
 	} else {
-		return Proxy{}, false, &RateLimitError{Reason: reason, ProxyID: 0}
+		return Proxy{}, false, slotLimitError(reason, 0)
 	}
 }
 
@@ -537,6 +544,15 @@ func streamGenerateOnce(prompt, latest string, mc ModelConfig, pending []pending
 			}
 			break
 		}
+		if blocked := handleEgressError(picked.ID, err); blocked != nil {
+			return attrib(blocked)
+		}
+		if !xsrfErrBlamesCookie(err) {
+			if pickedOK {
+				recordProxyResult(picked.ID, false, err.Error())
+			}
+			return attrib(err)
+		}
 		// 取不到 SNlM0e 基本等于这个 cookie 已失效（页面把我们当匿名用户了）。
 		// 换号之前先给它一次机会：强制轮转一次再重取。
 		//
@@ -556,6 +572,10 @@ func streamGenerateOnce(prompt, latest string, mc ModelConfig, pending []pending
 							bindAccountProxy(fresh.ID, picked.ID)
 						}
 						break
+					} else if blocked := handleEgressError(picked.ID, err2); blocked != nil {
+						return attrib(blocked)
+					} else if !xsrfErrBlamesCookie(err2) {
+						return attrib(err2)
 					}
 				}
 			}
@@ -826,6 +846,10 @@ func streamGenerateOnce(prompt, latest string, mc ModelConfig, pending []pending
 	attemptLimit := rtCfg().RetryAttempts
 	firstWait := firstOutputWait(mc)
 	for attempt := 0; attempt < attemptLimit; attempt++ {
+		if blocked := currentEgressError(picked.ID); blocked != nil {
+			lastErr = blocked
+			break
+		}
 		attempts++
 		attemptStart := time.Now()
 		var statusCode int
@@ -875,6 +899,10 @@ func streamGenerateOnce(prompt, latest string, mc ModelConfig, pending []pending
 			res.Emitted, res.EmittedReasoning = tracker.emitted, rtracker.emitted
 			return res, err
 		}
+		if blocked := handleEgressError(picked.ID, err); blocked != nil {
+			lastErr = blocked
+			break
+		}
 		if err != nil {
 			lastErr = err
 			// 出错话术不记进代理健康度：匿名直连也一样出，跟出口无关，算进去会误熔断。
@@ -892,6 +920,10 @@ func streamGenerateOnce(prompt, latest string, mc ModelConfig, pending []pending
 			continue
 		}
 		if statusCode != 200 {
+			if blocked := handleEgressError(picked.ID, upstreamEgressSignal(statusCode, "", "")); blocked != nil {
+				lastErr = blocked
+				break
+			}
 			// token 过期时上游回 400 + xsrf。作废缓存重取一次再打，
 			// 这种自愈不算进重试预算，否则一次过期就吃掉全部重试。
 			if statusCode == 400 && isXSRFError(string(raw)) && cookieStr != "" && !xsrfRetried {
@@ -964,6 +996,7 @@ func streamGenerateOnce(prompt, latest string, mc ModelConfig, pending []pending
 			recordProxyResult(picked.ID, true, "")
 		}
 		markCookieByStatus(cookieID, 200, "")
+		clearEgressBackoff(picked.ID, t0)
 		result := &StreamResult{
 			Emitted:          tracker.emitted,
 			EmittedReasoning: rtracker.emitted,
@@ -1102,6 +1135,9 @@ func setAuthUserHeaders(h map[string]string, authuser int) {
 // 实测号活一两小时就失效 —— 所以这些必须收下来并写回账号。
 func doGeminiRequest(endpoint, body string, headers map[string]string, proxyURL string,
 	onLine func(string) error, firstWait ...time.Duration) (status int, raw []byte, ttfb int64, cookies []string, resultErr error) {
+	if err := guardEgressURL(proxyURL); err != nil {
+		return 0, nil, 0, nil, err
+	}
 	var wait time.Duration
 	if len(firstWait) > 0 {
 		wait = firstWait[0]
@@ -1130,6 +1166,9 @@ func doGeminiRequest(endpoint, body string, headers map[string]string, proxyURL 
 			return 0, nil, 0, nil, err
 		}
 		defer resp.Body.Close()
+		if signal := upstreamEgressSignal(resp.StatusCode, resp.Header.Get("Location"), resp.Header.Get("Retry-After")); signal != nil {
+			return resp.StatusCode, nil, time.Since(sendAt).Milliseconds(), nil, signal
+		}
 		raw, ttfb, err := readBody(resp.Body, onLine, sendAt)
 		if err != nil {
 			return resp.StatusCode, raw, ttfb, resp.Header.Values("Set-Cookie"), err
@@ -1151,6 +1190,9 @@ func doGeminiRequest(endpoint, body string, headers map[string]string, proxyURL 
 		return 0, nil, 0, nil, err
 	}
 	defer resp.Body.Close()
+	if signal := upstreamEgressSignal(resp.StatusCode, resp.Header.Get("Location"), resp.Header.Get("Retry-After")); signal != nil {
+		return resp.StatusCode, nil, time.Since(sendAt).Milliseconds(), nil, signal
+	}
 	raw, ttfb, err = readBody(resp.Body, onLine, sendAt)
 	if err != nil {
 		return resp.StatusCode, raw, ttfb, resp.Header.Values("Set-Cookie"), err

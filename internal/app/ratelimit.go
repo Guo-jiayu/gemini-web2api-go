@@ -66,6 +66,17 @@ func trySlotAcquire(proxyID int64) (bool, string) {
 	defer s.mu.Unlock()
 
 	now := time.Now().Unix()
+	guard, guardErr := loadEgressBackoff(proxyID)
+	if guardErr != nil {
+		return false, "unavailable"
+	}
+	if guard.Until > now {
+		return false, "egress_cooldown"
+	}
+	// After cooldown allow only one recovery request until it succeeds.
+	if guard.Until > 0 && s.inflight > 0 {
+		return false, "egress_probe"
+	}
 	// 清掉过期窗口
 	cutMin := now - 60
 	cutHour := now - 3600
@@ -100,13 +111,15 @@ func slotRelease(proxyID int64) {
 
 // SlotUsage admin UI 看用量用。
 type SlotUsage struct {
-	ProxyID   int64 `json:"proxy_id"`
-	Inflight  int   `json:"inflight"`
-	RPM       int   `json:"rpm"`
-	RPH       int   `json:"rph"`
-	LimitConc int   `json:"limit_concurrent"`
-	LimitRPM  int   `json:"limit_rpm"`
-	LimitRPH  int   `json:"limit_rph"`
+	EgressUntil  int64  `json:"egress_blocked_until"`
+	EgressReason string `json:"egress_reason"`
+	ProxyID      int64  `json:"proxy_id"`
+	Inflight     int    `json:"inflight"`
+	RPM          int    `json:"rpm"`
+	RPH          int    `json:"rph"`
+	LimitConc    int    `json:"limit_concurrent"`
+	LimitRPM     int    `json:"limit_rpm"`
+	LimitRPH     int    `json:"limit_rph"`
 }
 
 func slotUsage(proxyID int64) SlotUsage {
@@ -114,9 +127,11 @@ func slotUsage(proxyID int64) SlotUsage {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now().Unix()
+	guard, _ := loadEgressBackoff(proxyID)
 	s.minuteWin = pruneTimestamps(s.minuteWin, now-60)
 	s.hourWin = pruneTimestamps(s.hourWin, now-3600)
 	return SlotUsage{
+		EgressUntil: guard.Until, EgressReason: guard.Reason,
 		ProxyID:   proxyID,
 		Inflight:  s.inflight,
 		RPM:       len(s.minuteWin),

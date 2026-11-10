@@ -288,6 +288,7 @@ func writeGeminiCallError(w http.ResponseWriter, err error) {
 	case *PromptTooLongError:
 		writeGeminiError(w, 400, e.Error())
 	case *RateLimitError:
+		e.setRetryAfter(w)
 		writeGeminiError(w, 429, e.Error())
 	default:
 		writeGeminiError(w, 502, "upstream error: "+err.Error())
@@ -529,10 +530,7 @@ func handleGenerateContent(w http.ResponseWriter, r *http.Request, model string)
 	}
 	text, calls, res, err := runGeminiCall(g, nil, nil)
 	if err != nil {
-		status := 502
-		if _, ok := err.(*ModelDowngradedError); ok {
-			status = 429
-		}
+		status := callErrorStatus(err)
 		recordRequest("gemini.generateContent", g.modelName, g.prompt, "", res, status, err.Error(), false)
 		writeGeminiCallError(w, err)
 		return
@@ -664,10 +662,7 @@ func handleStreamGenerateContent(w http.ResponseWriter, r *http.Request, model s
 
 	text, calls, res, err := runGeminiCall(g, onDelta, onReasoning)
 	if err != nil {
-		status := 502
-		if _, ok := err.(*ModelDowngradedError); ok {
-			status = 429
-		}
+		status := callErrorStatus(err)
 		recordRequest("gemini.streamGenerateContent", g.modelName, g.prompt, "", res, status, err.Error(), true)
 		if st.Started() {
 			st.fail(err)

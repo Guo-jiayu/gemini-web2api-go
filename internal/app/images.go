@@ -268,10 +268,15 @@ func handleImages(w http.ResponseWriter, r *http.Request) {
 			}
 		case *RateLimitError:
 			status = 429
+			e.setRetryAfter(w)
 		case *PromptTooLongError:
 			status = 400
 		}
 		recordRequest(endpoint, name, fullPrompt, "", res, status, err.Error(), stream)
+		if rate, ok := err.(*RateLimitError); ok {
+			writeRateLimitError(w, rate)
+			return
+		}
 		writeImageError(w, status, err.Error())
 		return
 	}

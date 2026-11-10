@@ -274,6 +274,9 @@ func redactWCError(err error) error {
 
 // wcSend 发一条请求。跟 doGeminiRequest 同一套出口规则：配了代理走 stdlib，直连走 tls-client。
 func wcSend(ctx context.Context, method, u, body, cookie, proxyURL string) (*wcResp, error) {
+	if err := guardEgressURL(proxyURL); err != nil {
+		return nil, err
+	}
 	headers := map[string]string{
 		"Accept":          "*/*",
 		"Accept-Language": "en-US,en;q=0.9",
@@ -303,6 +306,10 @@ func wcSend(ctx context.Context, method, u, body, cookie, proxyURL string) (*wcR
 		if err != nil {
 			return nil, redactWCError(err)
 		}
+		if signal := upstreamEgressSignal(resp.StatusCode, resp.Header.Get("Location"), resp.Header.Get("Retry-After")); signal != nil {
+			resp.Body.Close()
+			return nil, signal
+		}
 		return &wcResp{resp.StatusCode, resp.Header.Values("Set-Cookie"),
 			resp.Header.Get("X-HTTP-Session-Id"), resp.Body}, nil
 	}
@@ -316,6 +323,10 @@ func wcSend(ctx context.Context, method, u, body, cookie, proxyURL string) (*wcR
 	resp, err := getTLSClient().Do(req)
 	if err != nil {
 		return nil, redactWCError(err)
+	}
+	if signal := upstreamEgressSignal(resp.StatusCode, resp.Header.Get("Location"), resp.Header.Get("Retry-After")); signal != nil {
+		resp.Body.Close()
+		return nil, signal
 	}
 	return &wcResp{resp.StatusCode, resp.Header.Values("Set-Cookie"),
 		resp.Header.Get("X-HTTP-Session-Id"), resp.Body}, nil

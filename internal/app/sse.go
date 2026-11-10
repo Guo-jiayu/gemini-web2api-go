@@ -133,7 +133,7 @@ func (s *sseWriter) Fail(err error) {
 		"id": s.id, "object": "chat.completion.chunk",
 		"created": s.created, "model": s.model,
 		"choices": []map[string]interface{}{},
-		"error":   map[string]string{"message": err.Error(), "type": "upstream_error"},
+		"error":   callErrorDetails(err),
 	}
 	b, _ := json.Marshal(c)
 	fmt.Fprintf(s.w, "data: %s\n\n", b)

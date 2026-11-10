@@ -575,6 +575,7 @@ func checkAccountCookie(a CookieAccount) CookieCheck {
 		return CookieCheck{Detail: explainCookieFailure(err), ProxyName: name, TookMs: took}
 	}
 	markAccountResult(a.ID, true, "")
+	clearEgressBackoff(picked.ID, t0)
 	detail := "登录态有效"
 	if extractSAPISID(a.Cookie) == "" {
 		detail += "，但缺 SAPISID（算不出授权头，部分接口会被当匿名）"

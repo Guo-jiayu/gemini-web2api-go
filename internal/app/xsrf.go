@@ -234,7 +234,17 @@ func xsrfCacheKey(cookie string, authuser int, proxyURL string) string {
 // 免得页面里取到的 token 和后续请求来自两个不同 IP。
 // cookie 传空串就是匿名抓（页面照样返回，只是没有登录态字段）。
 // authuser>0 抓 /u/N/app，页面里的 token 才是第 N 个号的。
-func fetchAppPage(cookie string, authuser int, proxyURL string) ([]byte, error) {
+func fetchAppPage(cookie string, authuser int, proxyURL string) (result []byte, resultErr error) {
+	defer func() {
+		if id, known := egressIDForURL(proxyURL); known {
+			if blocked := handleEgressError(id, resultErr); blocked != nil {
+				resultErr = blocked
+			}
+		}
+	}()
+	if err := guardEgressURL(proxyURL); err != nil {
+		return nil, err
+	}
 	// Session setup must not inherit the multi-minute generation timeout.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -263,7 +273,7 @@ func fetchAppPage(cookie string, authuser int, proxyURL string) ([]byte, error) 
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode != 200 {
-			return nil, newAppPageStatusError(resp.StatusCode, resp.Header.Get("Location"))
+			return nil, newAppPageResponseError(resp.StatusCode, resp.Header.Get("Location"), resp.Header.Get("Retry-After"))
 		}
 		body, err = io.ReadAll(resp.Body)
 		if err != nil {
@@ -284,7 +294,7 @@ func fetchAppPage(cookie string, authuser int, proxyURL string) ([]byte, error) 
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode != 200 {
-			return nil, newAppPageStatusError(resp.StatusCode, resp.Header.Get("Location"))
+			return nil, newAppPageResponseError(resp.StatusCode, resp.Header.Get("Location"), resp.Header.Get("Retry-After"))
 		}
 		body, err = io.ReadAll(resp.Body)
 		if err != nil {
@@ -397,8 +407,17 @@ func isXSRFError(raw string) bool {
 // 只留 host+path：/sorry 的 query 里有长串 continue/q 参数，进日志和面板没用。
 // 文本仍以 "fetch /app: HTTP <code>" 开头，按子串判 "HTTP 302" 的地方不受影响。
 type appPageStatusError struct {
-	Status   int
-	Location string // host+path，没有 Location 头时为空
+	RetryAfter time.Duration
+	Status     int
+	Location   string // host+path，没有 Location 头时为空
+}
+
+func newAppPageResponseError(status int, location, retryAfter string) *appPageStatusError {
+	e := newAppPageStatusError(status, location)
+	if signal, ok := upstreamEgressSignal(status, location, retryAfter).(*upstreamEgressError); ok {
+		e.RetryAfter = signal.RetryAfter
+	}
+	return e
 }
 
 func newAppPageStatusError(status int, location string) *appPageStatusError {

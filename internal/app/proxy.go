@@ -270,6 +270,13 @@ func pickProxyPreferring(preferID int64) (Proxy, bool, string) {
 	}
 	blockedReason := ""
 	addReason := func(reason string) {
+		if strings.HasPrefix(reason, "egress_") {
+			blockedReason = reason
+			return
+		}
+		if strings.HasPrefix(blockedReason, "egress_") {
+			return
+		}
 		if blockedReason == "" {
 			blockedReason = reason
 		} else if blockedReason != reason {

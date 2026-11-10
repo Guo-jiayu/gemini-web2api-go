@@ -190,6 +190,9 @@ func parseConvIDs(raw string) (cid, rid, rcid, tok26 string) {
 // 载体。续接请求必须每轮带上它，否则被服务端当新会话（实测不带 0/4 通、带 4/4 通）。
 // 必须走跟正式请求同一出口。
 func getAnonSession(proxyURL string) (string, error) {
+	if err := guardEgressURL(proxyURL); err != nil {
+		return "", err
+	}
 	req := func() (*http.Response, io.ReadCloser, []string, error) {
 		if proxyURL != "" {
 			r, err := http.NewRequest("GET", "https://gemini.google.com/app", nil)
@@ -201,6 +204,10 @@ func getAnonSession(proxyURL string) (string, error) {
 			if err != nil {
 				return nil, nil, nil, err
 			}
+			if signal := upstreamEgressSignal(resp.StatusCode, resp.Header.Get("Location"), resp.Header.Get("Retry-After")); signal != nil {
+				resp.Body.Close()
+				return nil, nil, nil, signal
+			}
 			return resp, resp.Body, resp.Header.Values("Set-Cookie"), nil
 		}
 		r, err := fhttp.NewRequest("GET", "https://gemini.google.com/app", nil)
@@ -211,6 +218,10 @@ func getAnonSession(proxyURL string) (string, error) {
 		resp, err := getTLSClient().Do(r)
 		if err != nil {
 			return nil, nil, nil, err
+		}
+		if signal := upstreamEgressSignal(resp.StatusCode, resp.Header.Get("Location"), resp.Header.Get("Retry-After")); signal != nil {
+			resp.Body.Close()
+			return nil, nil, nil, signal
 		}
 		return nil, resp.Body, resp.Header.Values("Set-Cookie"), nil
 	}
@@ -265,6 +276,9 @@ func streamGenerateConv(prompt string, mc ModelConfig, conv *convState,
 		if conv.cookie == "" && !conv.isLogin {
 			c, err := getAnonSession(proxyURL)
 			if err != nil {
+				if blocked := handleEgressError(p.ID, err); blocked != nil {
+					return &StreamResult{ProxyID: p.ID, ProxyName: p.Name}, blocked
+				}
 				return &StreamResult{ProxyID: p.ID, ProxyName: p.Name}, fmt.Errorf("建匿名会话失败: %w", err)
 			}
 			conv.cookie = c
@@ -277,6 +291,9 @@ func streamGenerateConv(prompt string, mc ModelConfig, conv *convState,
 		if tok, err := getXSRF(conv.cookie, conv.authuser, proxyURL); err == nil {
 			xsrf = tok
 		} else {
+			if blocked := handleEgressError(p.ID, err); blocked != nil {
+				return &StreamResult{ProxyID: p.ID, ProxyName: p.Name, AccountID: conv.accountID}, blocked
+			}
 			return &StreamResult{ProxyID: p.ID, ProxyName: p.Name, AccountID: conv.accountID},
 				fmt.Errorf("取 XSRF 失败: %w", err)
 		}
@@ -377,6 +394,10 @@ func streamGenerateConv(prompt string, mc ModelConfig, conv *convState,
 	attemptLimit := rtCfg().RetryAttempts
 	firstWait := firstOutputWait(mc)
 	for attempt := 0; attempt < attemptLimit; attempt++ {
+		if blocked := currentEgressError(p.ID); blocked != nil {
+			lastErr = blocked
+			break
+		}
 		statusCode, raw, ttfb, setCookie, err := doGeminiRequest(endpoint, body, geminiHeaders, proxyURL, lineCB, firstWait)
 		if len(setCookie) > 0 && conv.cookie != "" {
 			if merged := mergeSetCookie(conv.cookie, setCookie); merged != conv.cookie {
@@ -389,6 +410,14 @@ func streamGenerateConv(prompt string, mc ModelConfig, conv *convState,
 			return &StreamResult{ProxyID: p.ID, ProxyName: p.Name, AccountID: conv.accountID,
 				UpstreamModel: mde.Reported, TotalMs: time.Since(t0).Milliseconds(),
 				Emitted: tracker.emitted, EmittedReasoning: rtracker.emitted}, err
+		}
+		if blocked := handleEgressError(p.ID, err); blocked != nil {
+			lastErr = blocked
+			break
+		}
+		if blocked := handleEgressError(p.ID, upstreamEgressSignal(statusCode, "", "")); blocked != nil {
+			lastErr = blocked
+			break
 		}
 		if err != nil || statusCode != 200 || !hasContentFrame(string(raw)) {
 			if err == nil && statusCode == 200 {
@@ -438,6 +467,7 @@ func streamGenerateConv(prompt string, mc ModelConfig, conv *convState,
 		}
 		conv.tok26 = tok26 // 每轮更新（可能为空）
 		conv.turn++
+		clearEgressBackoff(p.ID, t0)
 		if pickedOK {
 			recordProxyResult(p.ID, true, "")
 		}
