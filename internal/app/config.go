@@ -32,6 +32,8 @@ type Config struct {
 
 	// 代理连续失败熔断后隔多久放回池子（分钟），0 = 不恢复。
 	ProxyCooldownMin int `json:"proxy_cooldown_min"`
+	// DisableSorryCooldown disables new local /sorry pauses, not upstream Retry-After.
+	DisableSorryCooldown bool `json:"disable_sorry_cooldown"`
 	// 代理池无可用出口时是否退回直连。默认 false。
 	FallbackDirect bool `json:"fallback_direct"`
 	// cookie 失效时是否降级成匿名继续跑。默认 false。

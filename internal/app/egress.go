@@ -101,6 +101,10 @@ func handleEgressError(id int64, err error) *RateLimitError {
 		}
 		signal.RetryAfter = page.RetryAfter
 	}
+	if signal.Reason == "google_sorry" && rtCfg().DisableSorryCooldown && signal.RetryAfter <= 0 {
+		logf("[egress] 出口 #%d 收到 google_sorry；固定冷却已关闭，直接返回上游错误", id)
+		return &RateLimitError{Reason: "egress_google_sorry", ProxyID: id}
+	}
 	egressWriteMu.Lock()
 	defer egressWriteMu.Unlock()
 	old, readErr := loadEgressBackoff(id)
@@ -112,6 +116,9 @@ func handleEgressError(id int64, err error) *RateLimitError {
 		wait = time.Duration(rtCfg().ProxyCooldownMin) * time.Minute
 		if wait < time.Minute {
 			wait = 10 * time.Minute
+		}
+		if rtCfg().DisableSorryCooldown {
+			wait = 0 // Only the upstream Retry-After remains mandatory.
 		}
 	} else {
 		for i := 0; i < old.Failures && wait < 15*time.Minute; i++ {
@@ -218,6 +225,9 @@ func (e *RateLimitError) setRetryAfter(w http.ResponseWriter) {
 	}
 }
 func (e *RateLimitError) code() string {
+	if e.Reason == "egress_google_sorry" {
+		return "upstream_google_sorry"
+	}
 	if strings.HasPrefix(e.Reason, "egress_") {
 		return "egress_cooldown"
 	}
@@ -243,6 +253,9 @@ func callErrorStatus(err error) int {
 }
 
 func egressErrorMessage(e *RateLimitError) string {
+	if e.Reason == "egress_google_sorry" {
+		return fmt.Sprintf("upstream Google /sorry blocked egress #%d; local fixed cooldown is disabled", e.ProxyID)
+	}
 	return fmt.Sprintf("egress #%d is cooling down (%s); retry after %s", e.ProxyID, e.Reason, e.RetryAfter.Round(time.Second))
 }
 

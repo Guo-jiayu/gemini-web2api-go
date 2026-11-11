@@ -48,6 +48,50 @@ func TestEgressSignalClassification(t *testing.T) {
 	}
 }
 
+func TestSorryCooldownDisabled(t *testing.T) {
+	const id int64 = 990091
+	withTestProxySlot(t, Proxy{ID: id, URL: "http://disabled-sorry.invalid", Enabled: true}, func(c *RuntimeConfig) {
+		c.DisableSorryCooldown = true
+		c.ProxyCooldownMin = 120
+	})
+	clearTestEgress(t, id)
+	signal := upstreamEgressSignal(302, "https://www.google.com/sorry/index", "")
+	err := handleEgressError(id, signal)
+	if err == nil || err.code() != "upstream_google_sorry" || err.RetryAfter != 0 {
+		t.Fatalf("expected upstream rejection without local pause: %v", err)
+	}
+	state, loadErr := loadEgressBackoff(id)
+	if loadErr != nil || state.Until != 0 || currentEgressError(id) != nil {
+		t.Fatalf("disabled pause persisted: %+v, %v", state, loadErr)
+	}
+	if handleEgressError(id, err) != err {
+		t.Fatal("reclassified upstream rejection")
+	}
+	w := httptest.NewRecorder()
+	writeRateLimitError(w, err)
+	if w.Code != 429 || w.Header().Get("Retry-After") != "" || !strings.Contains(w.Body.String(), "upstream_google_sorry") {
+		t.Fatalf("misleading cooldown response: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestDisabledSorryCooldownHonorsRetryAfterAndHTTP429(t *testing.T) {
+	const id int64 = 990092
+	withTestProxySlot(t, Proxy{ID: id, URL: "http://sorry-retry.invalid", Enabled: true}, func(c *RuntimeConfig) {
+		c.DisableSorryCooldown = true
+		c.ProxyCooldownMin = 120
+	})
+	clearTestEgress(t, id)
+	err := handleEgressError(id, upstreamEgressSignal(302, "https://www.google.com/sorry/index", "90"))
+	if err == nil || err.RetryAfter < 90*time.Second || err.RetryAfter > 92*time.Second {
+		t.Fatalf("must honor upstream wait without applying 2 hours: %v", err)
+	}
+	clearEgressBackoff(id, time.Now())
+	err = handleEgressError(id, upstreamEgressSignal(429, "", "180"))
+	if err == nil || err.RetryAfter < 180*time.Second || currentEgressError(id) == nil {
+		t.Fatal("ordinary upstream 429 was bypassed")
+	}
+}
+
 func TestEgressSorryStopsAccountRetriesAndLogs429(t *testing.T) {
 	var calls atomic.Int32
 	rotationTestClient(t, func(r *http.Request) (*http.Response, error) {

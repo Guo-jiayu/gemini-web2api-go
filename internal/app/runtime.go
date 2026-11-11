@@ -34,6 +34,8 @@ type RuntimeConfig struct {
 	// ProxyCooldownMin 是代理连续失败熔断后隔多久放回池子，单位分钟。
 	// 0 = 不恢复（熔断即永久除名，要手动重置）。默认按实测的封禁恢复时长取 120。
 	ProxyCooldownMin int `json:"proxy_cooldown_min"`
+	// DisableSorryCooldown affects new /sorry responses; existing pauses retain their deadline.
+	DisableSorryCooldown bool `json:"disable_sorry_cooldown"`
 	// FallbackDirect 决定代理池一个出口都用不上时是退回直连还是直接 429。
 	// 默认 false：配了代理池就意味着不想暴露本机 IP，悄悄直连会把这个前提废掉。
 	FallbackDirect bool `json:"fallback_direct"`
@@ -100,12 +102,13 @@ func initRuntimeConfig() {
 		Impersonate:        cfg.Impersonate,
 		GeminiBL:           cfg.GeminiBL,
 
-		ProxyCooldownMin: cfg.ProxyCooldownMin,
-		FallbackDirect:   cfg.FallbackDirect,
-		FallbackAnon:     cfg.FallbackAnon,
-		GeminiBLAuto:     cfg.GeminiBLAuto,
-		MaxPromptBytes:   cfg.MaxPromptBytes,
-		MultiTurn:        cfg.MultiTurn,
+		ProxyCooldownMin:     cfg.ProxyCooldownMin,
+		DisableSorryCooldown: cfg.DisableSorryCooldown,
+		FallbackDirect:       cfg.FallbackDirect,
+		FallbackAnon:         cfg.FallbackAnon,
+		GeminiBLAuto:         cfg.GeminiBLAuto,
+		MaxPromptBytes:       cfg.MaxPromptBytes,
+		MultiTurn:            cfg.MultiTurn,
 
 		AutoDeleteConversation: cfg.AutoDeleteConversation,
 		AnonFirst:              cfg.AnonFirst,
