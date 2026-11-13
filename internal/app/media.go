@@ -852,14 +852,38 @@ func appendArtifactMarkdown(text string, arts []MediaArtifact) string {
 	return b.String()
 }
 
-// dataURLRe 匹配一整条 base64 data URL。
-var dataURLRe = regexp.MustCompile(`data:([-\w.+/]+);base64,[A-Za-z0-9+/=]+`)
+var dataURLHeaderRe = regexp.MustCompile(`data:([-\w.+/]+);base64,`)
 
 // stripDataURLs 把 base64 data URL 从文本里抠掉，只留个短占位。
 // 算 token / 记长度时用 —— 一张图 base64 上百万字符，按它计费等于让用户为看不见的
 // 二进制买单，下游 newapi 是按 output token 收钱的。产物本身照常在 content 里返回。
 func stripDataURLs(text string) string {
-	return dataURLRe.ReplaceAllString(text, "data:$1;base64,<omitted>")
+	// Match only the small header with regexp. Scanning multi-megabyte base64
+	// in Go's regexp engine dominated image response bookkeeping.
+	var b strings.Builder
+	for rest := text; ; {
+		loc := dataURLHeaderRe.FindStringIndex(rest)
+		if loc == nil {
+			if b.Len() == 0 {
+				return text
+			}
+			b.WriteString(rest)
+			return b.String()
+		}
+		end := loc[1]
+		for end < len(rest) {
+			c := rest[end]
+			if !(c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '+' || c == '/' || c == '=') {
+				break
+			}
+			end++
+		}
+		b.WriteString(rest[:loc[1]])
+		if end > loc[1] {
+			b.WriteString("<omitted>")
+		}
+		rest = rest[end:]
+	}
 }
 
 // withAuthUserQuery 给产物下载链加 ?authuser=N（N>0 时）。

@@ -1,5 +1,7 @@
 # 接入 QQhuxuhui/new-api
 
+2026-11-13 复核与优化见 [文本、生图兼容及性能报告](newapi-flash-image-audit-20261113.md)。当前实测旧 `gemini-3.6-flash` 返回了不同的上游型号，被严格校验拒绝；不能仅依据历史测试判断 Flash 仍可用。
+
 适配版本：`4.27.1-newapi`。对照源码：[`QQhuxuhui/new-api@8faf1d45`](https://github.com/QQhuxuhui/new-api/tree/8faf1d45e8c101974dc7483324d3d91c8a462ffe)。仅修改 web2api，new-api 无需改源码。
 
 ## 渠道选择

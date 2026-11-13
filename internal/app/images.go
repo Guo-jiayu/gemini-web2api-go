@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime"
 	"net/http"
 	"strconv"
@@ -259,23 +260,16 @@ func handleImages(w http.ResponseWriter, r *http.Request) {
 		endpoint = "images.edits"
 	}
 	if err != nil {
-		status := 502
-		switch e := err.(type) {
-		case *ModelDowngradedError:
-			status = 429
-			if e.RetryAfter > 0 {
-				w.Header().Set("Retry-After", strconv.Itoa(int(e.RetryAfter/time.Second)+1))
-			}
-		case *RateLimitError:
-			status = 429
-			e.setRetryAfter(w)
-		case *PromptTooLongError:
-			status = 400
-		}
+		status := callErrorStatus(err)
 		recordRequest(endpoint, name, fullPrompt, "", res, status, err.Error(), stream)
-		if rate, ok := err.(*RateLimitError); ok {
+		var rate *RateLimitError
+		if errors.As(err, &rate) {
 			writeRateLimitError(w, rate)
 			return
+		}
+		var downgraded *ModelDowngradedError
+		if errors.As(err, &downgraded) && downgraded.RetryAfter > 0 {
+			w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(downgraded.RetryAfter.Seconds()))))
 		}
 		writeImageError(w, status, err.Error())
 		return

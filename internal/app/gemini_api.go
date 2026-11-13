@@ -3,6 +3,7 @@ package app
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -279,20 +280,17 @@ func writeGeminiError(w http.ResponseWriter, code int, msg string) {
 
 // writeGeminiCallError 跟 OpenAI 那两条路同一套分流：降级 429、超长 400、限流 429、其余 502。
 func writeGeminiCallError(w http.ResponseWriter, err error) {
-	switch e := err.(type) {
-	case *ModelDowngradedError:
-		if e.RetryAfter > 0 {
-			w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(e.RetryAfter.Seconds()))))
+	var downgraded *ModelDowngradedError
+	var rate *RateLimitError
+	switch {
+	case errors.As(err, &downgraded):
+		if downgraded.RetryAfter > 0 {
+			w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(downgraded.RetryAfter.Seconds()))))
 		}
-		writeGeminiError(w, 429, e.Error())
-	case *PromptTooLongError:
-		writeGeminiError(w, 400, e.Error())
-	case *RateLimitError:
-		e.setRetryAfter(w)
-		writeGeminiError(w, 429, e.Error())
-	default:
-		writeGeminiError(w, 502, "upstream error: "+err.Error())
+	case errors.As(err, &rate):
+		rate.setRetryAfter(w)
 	}
+	writeGeminiError(w, callErrorStatus(err), err.Error())
 }
 
 func geminiModelInfo(name string, c ModelConfig) map[string]interface{} {
@@ -515,7 +513,7 @@ func (g *geminiCall) run(onDelta, onReasoning func(string)) (string, []ToolCall,
 	if rtCfg().MultiTurn && len(g.images) == 0 && g.modelCfg.Tool == 0 {
 		return callGeminiConv(g.messages, g.modelCfg, g.tools, g.toolChoice, onDelta, onReasoning)
 	}
-	return callGemini(g.prompt, g.latest, g.modelCfg, g.tools, g.images, onDelta, onReasoning)
+	return callGeminiNative(g.prompt, g.latest, g.modelCfg, g.tools, g.images, onDelta, onReasoning)
 }
 
 // runGeminiCall 是调上游那一步，测试里替换成桩。
@@ -627,8 +625,9 @@ func (s *geminiStream) thought(d string) {
 
 // fail 在已开流后报错：HTTP 状态码改不了了，就把 Google 形状的错误体当最后一块发出去。
 func (s *geminiStream) fail(err error) {
+	status := callErrorStatus(err)
 	s.write(map[string]interface{}{"error": map[string]interface{}{
-		"code": 502, "message": err.Error(), "status": geminiStatus(502)}})
+		"code": status, "message": err.Error(), "status": geminiStatus(status)}})
 	s.end()
 }
 

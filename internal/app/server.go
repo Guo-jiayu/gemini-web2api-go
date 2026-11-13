@@ -132,6 +132,18 @@ func rejectUnsupported(req map[string]interface{}, messages []map[string]interfa
 
 func callGemini(prompt, latest string, mc ModelConfig, tools []map[string]interface{},
 	images []pendingUpload, onDelta, onReasoning func(string)) (string, []ToolCall, *StreamResult, error) {
+	text, calls, res, err := callGeminiNative(prompt, latest, mc, tools, images, onDelta, onReasoning)
+	if err == nil && res != nil && (mc.Tool == toolImage || mc.Tool == toolMusic || mc.Tool == toolVideo) {
+		text = appendArtifactMarkdown(text, res.Artifacts)
+	}
+	return text, calls, res, err
+}
+
+// Native Gemini and Images encode artifacts in their own response fields.
+// Keep binary artifacts separate until the protocol layer to avoid building
+// and discarding a second base64 copy (and scanning it for log/token usage).
+func callGeminiNative(prompt, latest string, mc ModelConfig, tools []map[string]interface{},
+	images []pendingUpload, onDelta, onReasoning func(string)) (string, []ToolCall, *StreamResult, error) {
 	res, err := streamGenerateWithFiles(prompt, latest, mc, images, onDelta, onReasoning)
 	if err != nil {
 		// res 非 nil：失败时它只带归属（哪个号 / 哪个出口），给 recordRequest 用
@@ -161,8 +173,6 @@ func callGemini(prompt, latest string, mc ModelConfig, tools []map[string]interf
 			}
 			return "", nil, res, fmt.Errorf("media generation succeeded but artifact retrieval failed: %w", cause)
 		}
-		// 产物以 base64 data URL 追加到正文（可能没正文，只有图/乐/视频）。
-		text = appendArtifactMarkdown(text, res.Artifacts)
 		return text, nil, res, nil
 	}
 	if text == "" {
