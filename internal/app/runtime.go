@@ -184,6 +184,8 @@ func validateRuntimeConfig(c RuntimeConfig) error {
 
 // saveRuntimeConfig 校验并持久化，成功后立刻生效。
 func saveRuntimeConfig(next RuntimeConfig) error {
+	modelSettingsMu.Lock()
+	defer modelSettingsMu.Unlock()
 	if err := validateRuntimeConfig(next); err != nil {
 		return err
 	}

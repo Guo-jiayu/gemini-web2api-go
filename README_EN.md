@@ -92,7 +92,7 @@ The projects most often compared with this one are the Python [Sophomoresty/gemi
 **Models**
 - `gemini-3.6-flash` and `gemini-3.5-flash-lite` work anonymously, web search included
 - `gemini-3.1-pro` needs a cookie; every reply carries a reasoning chain
-- `gemini-3.8-flash` and `gemini-4-argon` need a cookie from a paid / Ultra account
+- `gemini-4-hydrogen` needs a signed-in account with model access; `gemini-4-argon` needs a paid / Ultra account cookie
 - Every model has a `-thinking` variant (extended thinking), available with a cookie
   (`reasoning_content`)
 - Every response records which model the backend **actually** used, so silent
@@ -339,20 +339,28 @@ The frontend is a single HTML file and Chart.js is embedded in the binary, **not
 
 ## Models
 
+### Fetch and edit models in the admin panel
+
+Open **模型管理 (Model management)**, select an enabled cookie account, and click **获取上游模型列表 (Fetch upstream models)**. Discovery reads that account's `otAQ7b` catalog, including primary routing IDs and Mode values. Results vary by account. Fetching only previews the catalog: add or update individual entries and save to apply them; other manual configurations are preserved.
+
+The editor supports API IDs, strict upstream names, descriptions, tool types, thinking tiers, routing IDs, Mode, login requirements and enabled state. Configuration is persisted in `model_catalog_v1`, applies immediately to OpenAI, native Gemini and MCP requests, and survives restarts. Change the default model in Settings before disabling or deleting it. Concurrent edits are rejected rather than overwriting newer changes.
+
+Auto entries without a fixed upstream identity require a manually verified upstream name before saving. Discovery does not verify generation access or automatically invent thinking variants. The following list describes built-in defaults before a custom catalog is saved.
+
 Models follow the Gemini web app's model picker (the list comes from `batchexecute?rpcids=otAQ7b`): five base models,
-of which 3.6 Flash / 3.5 Flash-Lite / 3.1 Pro work with a free account and 3.8 Flash / 4 Argon need a paid one; the rest are their thinking tiers and the media tools.
+of which 3.6 Flash / 3.5 Flash-Lite / 3.1 Pro work with a free account and 4 Hydrogen requires model access and 4 Argon needs a paid account; the rest are their thinking tiers and the media tools.
 
 | Model | Description |
 |---|---|
 | `gemini-3.6-flash` | All-round, default |
 | `gemini-3.5-flash-lite` | Fast and lightweight |
 | `gemini-3.1-pro` | Most capable, **needs a cookie**; every reply carries a reasoning chain |
-| `gemini-3.8-flash` | Newer Flash, **needs a cookie from a PAID Gemini account** (free accounts get downgraded to 3.5 Flash-Lite). `gemini-3.7-flash` is an alias — Google bumped that same hex from 3.7 to 3.8 in place |
+| `gemini-4-hydrogen` | 4 Hydrogen, replacing 3.8 Flash; needs a signed-in account with access to this model |
 | `gemini-4-argon` | 4 Argon (complex tasks), **needs a cookie from a PAID/Ultra Gemini account** (free accounts get downgraded to 3.5 Flash-Lite) |
 | `gemini-3.6-flash-thinking` | 3.6 Flash with extended thinking; **needs a cookie** |
 | `gemini-3.5-flash-lite-thinking` | 3.5 Flash-Lite with extended thinking; **needs a cookie** |
 | `gemini-3.1-pro-thinking` | 3.1 Pro with extended thinking; **needs a cookie** |
-| `gemini-3.8-flash-thinking` | 3.8 Flash with extended thinking; **needs a paid-account cookie** (`gemini-3.7-flash-thinking` is an alias) |
+| `gemini-4-hydrogen-thinking` | 4 Hydrogen with extended thinking; needs a signed-in account with model access |
 | `gemini-4-argon-thinking` | 4 Argon with extended thinking (upstream "High" tier), carries `reasoning_content`; **needs a PAID/Ultra account cookie** |
 | `gemini-4-argon-thinking-medium` | 4 Argon at the Medium thinking tier (thinks server-side, no `reasoning_content`); **needs a PAID/Ultra account cookie** |
 | `gemini-image` | Image generation (Nano Banana); base64 output; **needs a cookie** |
@@ -440,7 +448,7 @@ Saving takes effect **immediately**, no restart. Values live in the database and
 | Auto-delete conversation (`auto_delete_conversation`) | off by default. When on, each finished request deletes the conversation it left on gemini.google.com, so signed-in accounts don't pile them up. Signed-in only; async best-effort, a failed delete doesn't affect the response. |
 | Temporary chat (`temporary_chat`) | off by default. When on, uses Gemini web's native **Temporary Chat** (`inner[45]=1`): the conversation never enters the account's chat list and isn't used for model training — cleaner than auto-delete, and it saves that extra delete request. Only meaningful signed-in; automatically inactive when server-side multi-turn is on (a temporary chat leaves no list entry, while multi-turn relies on the server keeping the conversation). |
 | Full-size image download (`image_upscale`) | off by default. When on, generated images are fetched the way the web app's Download button does: upscaled 2× in each dimension on Ultra accounts, the original (not recompressed) file on other accounts. One extra request per image; falls back to the default image if it fails. See "Image & music" above. |
-| Anonymous-first (`anon_first`) | off by default. When on, requests that don't need a signed-in session (plain text, no thinking, no tool, no image) go out anonymously without consuming a cookie account, saving account quota; only 3.1 Pro / 3.8 Flash / extended thinking / image gen / file upload etc. pick an account. When off, any request uses an account as long as the pool has one. |
+| Anonymous-first (`anon_first`) | off by default. When on, requests that don't need a signed-in session (plain text, no thinking, no tool, no image) go out anonymously without consuming a cookie account, saving account quota; only 3.1 Pro / 4 Hydrogen / extended thinking / image gen / file upload etc. pick an account. When off, any request uses an account as long as the pool has one. |
 | Strict model check (`strict_model`) | off by default. When an account runs out of quota for a tier, upstream doesn't error — it silently switches to a weaker model and still returns 200. When on, if the model the server reports differs from the one requested, the downgraded answer is not treated as a success: the request retries on the next account, and if the whole pool is downgraded it returns `429 insufficient_quota` (`code: model_downgraded`, with `Retry-After`). For streaming this is decided before the first token is sent, so you never get half an answer followed by an error. Media models (image/music/video/canvas) are not checked. |
 | Downgrade cooldown (`strict_model_cooldown_min`) | Works with strict model check: how long a downgraded account rests for that model before being used again. Default 300 minutes (web usage is counted over a 5-hour window). 0 = do not remember, retry on every request. |
 | Retry attempts / retry delay / upstream timeout | |
@@ -737,7 +745,8 @@ spread requests across exits with the proxy pool rather than adding accounts.
 Anonymous (no cookie): `gemini-3.6-flash` and `gemini-3.5-flash-lite`, web search included.
 A free account's cookie additionally unlocks `gemini-3.1-pro`, the `-thinking` variants of 3.6 Flash / 3.5 Flash-Lite / 3.1 Pro,
 image / video input, image generation, music and canvas.
-Paid accounts only: `gemini-3.8-flash`, `gemini-4-argon` (and their `-thinking` variants; free accounts are
+`gemini-4-hydrogen` and its thinking variant need a signed-in account with model access.
+Paid accounts only: `gemini-4-argon` (and their `-thinking` variants; free accounts are
 downgraded to 3.5 Flash-Lite) and video generation (`gemini-video` / `/v1/videos`).
 
 ### Why does every message create a new conversation on gemini.google.com?
@@ -756,10 +765,10 @@ request at roughly **130,000 bytes** (about 160,000 with a cookie); agent tools 
 prompt and history per request will get off-topic answers and look "dumb" — a limit of the web model itself, not of
 the proxy. Function calling is prompt-level, so the model does not always answer in the expected format.
 
-### Is gemini-3.8-flash available?
+### Is gemini-4-hydrogen available?
 
-Yes: `gemini-3.8-flash` and `gemini-3.8-flash-thinking`, for paid Gemini accounts; requests from free accounts are
-downgraded server-side to 3.5 Flash-Lite. `gemini-3.7-flash` remains as an alias so older clients keep working.
+Yes: `gemini-4-hydrogen` and `gemini-4-hydrogen-thinking`, with a signed-in account that has model access.
+Strict model validation expects `4 Hydrogen` and still rejects other reported models. The old `gemini-3.7-flash` / `gemini-3.8-flash` names and thinking variants have been removed; update clients to the corresponding Hydrogen names.
 
 ### Can I use Gemini 4 Argon through this? How?
 

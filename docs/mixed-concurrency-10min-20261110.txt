@@ -1,0 +1,66 @@
+WEB2API 文本与生图混合并发持续测试
+
+测试目录：E:\python_code\sparkcode\gemini-web2api-go\data\mixed-soak-20261110-103729
+负载：5 个持续补位工作线程（1 Flash 文本、1 Pro 文本、3 生图）；满 600 秒停止新请求，等待在途请求完成。
+接口：本机 /v1/chat/completions；Flash gemini-3.6-flash；Pro gemini-3.1-pro；生图 gemini-image，1K、1:1。
+文本使用流式；生图按工作线程交替流式/非流式。测试保持单出口并发上限 5，将本地 RPM/RPH 临时设为 90/2000，完成后恢复。
+发压窗口：600 秒；最后一个请求于 599.95 秒启动；含收尾总耗时 617.08 秒。
+总请求：232；成功：230；失败：2；成功率：99.14%。
+服务端记录：232 条；实际并发峰值：5；文本与生图同时在途采样：299/299（2 秒间隔）。
+
+类型 | 成功/总数 | 成功请求耗时最小/P50/P95/最大（秒）
+flash | 96/96 | 3.265/4.92/14.78/26.234
+pro | 9/11 | 7.828/16.66/212.89/212.89
+image | 125/125 | 10.704/14.25/18.52/23.704
+
+生图流式/非流式统计：{'False': {'total': 61, 'success': 61}, 'True': {'total': 64, 'success': 64}}
+实际图片文件数：125；逐张解码并检查宽高比例；重复图片 SHA256 数：0。
+文本出现其他请求标识的次数：0。图片语义仅抽查，不把文件校验当作全部内容隔离证明。
+
+账号分配（服务端最终归属；不等于重试过程中的全部尝试）：
+#8: {'gemini-image': 13, 'gemini-3.6-flash': 12, 'gemini-3.1-pro': 2}
+#9: {'gemini-image': 12, 'gemini-3.6-flash': 14}
+#10: {'gemini-image': 16, 'gemini-3.6-flash': 6, 'gemini-3.1-pro': 4}
+#11: {'gemini-image': 10, 'gemini-3.6-flash': 14, 'gemini-3.1-pro': 2}
+#12: {'gemini-3.6-flash': 10, 'gemini-image': 16}
+#13: {'gemini-3.6-flash': 16, 'gemini-image': 10}
+#14: {'gemini-image': 15, 'gemini-3.6-flash': 8, 'gemini-3.1-pro': 2}
+#15: {'gemini-image': 18, 'gemini-3.6-flash': 6, 'gemini-3.1-pro': 1}
+#16: {'gemini-3.6-flash': 10, 'gemini-image': 15}
+
+按请求开始时间划分的每分钟统计（最终结果）：
+第 1 分钟：启动 22，成功 22
+第 2 分钟：启动 25，成功 25
+第 3 分钟：启动 24，成功 24
+第 4 分钟：启动 25，成功 24
+第 5 分钟：启动 27，成功 27
+第 6 分钟：启动 21，成功 21
+第 7 分钟：启动 20，成功 20
+第 8 分钟：启动 23，成功 23
+第 9 分钟：启动 20，成功 19
+第 10 分钟：启动 25，成功 25
+
+失败分类：
+2 次：{'message': 'upstream error: 等待首个输出超时（15s）'}
+
+配置残留差异：{}
+原配置恢复完成：True
+测试后账号状态：
+#8: enabled, health=ok, fail_count=0
+#9: enabled, health=ok, fail_count=0
+#10: enabled, health=ok, fail_count=0
+#11: enabled, health=ok, fail_count=0
+#12: enabled, health=ok, fail_count=0
+#13: enabled, health=ok, fail_count=0
+#14: enabled, health=ok, fail_count=0
+#15: enabled, health=ok, fail_count=0
+#16: enabled, health=ok, fail_count=0
+
+说明：成功要求 HTTP 200、流式完整结束（适用时），且文本含正确独立标识、图片能解码且符合 1:1。HTTP 200 内的流式错误也计失败。
+耗时来自客户端端到端测量；P50/P95 使用 nearest-rank 分位数（向上取整 n*q），只统计成功请求，失败耗时见 requests.jsonl。
+本次结论只适用于当前 9 个账号、单代理出口、文本与 1K 方图的 10 分钟负载；不代表长期配额或更高并发能力。
+明细：requests.jsonl、server-requests.json、samples.jsonl、summary.json、analysis.json、server-events.txt；图片在 images/。
+
+收尾恢复：恢复 5 并发、30 RPM、80 RPH 后，本轮测试累计使本地 RPH 达到 265。已在无在途请求时备份日志并重启本地服务，清除内存限流计数；这不重置上游 Google 配额。
+重启后仍为 9 个启用账号；独立 Flash 可用性验证：{'http_status': 200, 'ok': True, 'seconds': 9.78}，该请求不计入上面的 232 次。
+图片人工抽查：每个生图工作线程的首张、中间及末张，共 9 张，红茶壶/蓝帆船/黄纸鹤主体与各自提示词匹配；部分图片带有提示词中的变体序号。本轮成功统计仅代表接口与图片可用性，不代表所有视觉细节均符合提示词。

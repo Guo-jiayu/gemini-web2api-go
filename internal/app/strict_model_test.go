@@ -151,11 +151,15 @@ func TestModelDowngraded(t *testing.T) {
 		{"gemini-3.1-pro-thinking", "3.1 Pro High", false},
 		{"gemini-3.6-flash-thinking", "3.6 Flash 扩展", false},
 		{"gemini-4-argon-thinking", "4 Argon High", false},
-		{"gemini-3.7-flash", "3.8 Flash", false},
+		{"gemini-4-hydrogen", "4 Hydrogen", false},
+		{"gemini-4-hydrogen-thinking", "4 Hydrogen High", false},
+		{"gemini-4-hydrogen", "3.5 Flash-Lite", true},
+		{"gemini-4-hydrogen", "4 Carbon", true},
+		{"gemini-4-hydrogen", "4 Hydrogenated", true},
 		// 2026-10-24 实测：无 Argon 权限的号请求 Argon，自报 3.5 Flash-Lite
 		{"gemini-4-argon", "3.5 Flash-Lite", true},
-		// 同日实测：免费号请求 3.8，自报 3.6 Flash
-		{"gemini-3.8-flash", "3.6 Flash", true},
+		// Hydrogen 仍拒绝其他模型，不放宽严格校验。
+		{"gemini-4-hydrogen", "3.6 Flash", true},
 		{"gemini-3.1-pro", "3.5 Flash-Lite", true},
 		// 前缀必须断在词边界：Flash 不能把 Flash-Lite 认成自己
 		{"gemini-3.5-flash-lite", "3.5 Flash", true},

@@ -93,7 +93,7 @@
 **模型**
 - `gemini-3.6-flash`、`gemini-3.5-flash-lite` 匿名可用，含联网搜索
 - `gemini-3.1-pro` 挂 cookie 后可用，每次回答带思考链（`reasoning_content`）
-- `gemini-3.8-flash`、`gemini-4-argon` 要付费 / Ultra 账号的 cookie
+- `gemini-4-hydrogen` 需要有该模型权限的登录账号；`gemini-4-argon` 要付费 / Ultra 账号的 cookie
 - 各模型都有 `-thinking` 版（扩展思考），挂 cookie 后可用
 - 响应里记录服务端**实际**用了哪个模型，被静默降级一眼可见
 
@@ -333,20 +333,30 @@ Claude Code / Cursor 这类 MCP 客户端直接调用。
 
 ## 模型
 
+### 在管理后台获取和编辑模型
+
+进入「模型管理」，选择一个启用的 Cookie 账号，点击「获取上游模型列表」。列表读取该账号的 Google `otAQ7b` 清单，包含当前模型名称、主路由 ID 和 Mode；不同账号看到的模型可能不同。获取只展示结果，点击某项的「添加」或「更新」并保存后才生效，不会自动删除或覆盖其他手动配置。
+
+「手动添加」和「编辑」支持 API 模型名、上游校验名称、描述、模型类型、思考档位、路由 ID、Mode、登录要求和启用状态。配置保存在数据库 `model_catalog_v1` 中，保存后立即供 OpenAI、Gemini 原生和 MCP 接口使用，重启后保留。停用或删除当前默认模型前，先在「设置」中更换默认模型。并发编辑发生冲突时需刷新后重试。
+
+Auto 等没有明确上游模型名称的条目需要先手动填写实际返回的校验名称；获取清单本身不代表该账号一定能成功生成，也不会自动生成未经核验的思考档位。
+
+以下是未保存自定义清单时的内置模型：
+
 模型跟着 Gemini 网页端的模型选择器走（清单来自 `batchexecute?rpcids=otAQ7b`）：基础模型 5 个，
-3.6 Flash / 3.5 Flash-Lite / 3.1 Pro 免费号就能用，3.8 Flash / 4 Argon 要付费号；其余是它们的思考档和媒体工具。
+3.6 Flash / 3.5 Flash-Lite / 3.1 Pro 免费号就能用，4 Hydrogen 需要账号具有对应权限，4 Argon 要付费号；其余是它们的思考档和媒体工具。
 
 | 模型 | 描述 |
 |---|---|
 | `gemini-3.6-flash` | 全方位，默认 |
 | `gemini-3.5-flash-lite` | 极速、轻量 |
 | `gemini-3.1-pro` | 最强，**要配 cookie**；每次回答都带思考链 |
-| `gemini-3.8-flash` | 新款 Flash，**要付费 Gemini 账号的 cookie**（免费号降级成 3.5 Flash-Lite）。`gemini-3.7-flash` 是它的别名——Google 把 3.7 那个 hex 原地升成了 3.8 |
+| `gemini-4-hydrogen` | 4 Hydrogen，取代原 3.8 Flash；需要有该模型权限的登录账号 cookie |
 | `gemini-4-argon` | 4 Argon（复杂任务），**要付费/Ultra Gemini 账号的 cookie**（免费号降级成 3.5 Flash-Lite）|
 | `gemini-3.6-flash-thinking` | 3.6 Flash 开扩展思考，**要配 cookie** |
 | `gemini-3.5-flash-lite-thinking` | 3.5 Flash-Lite 开扩展思考，**要配 cookie** |
 | `gemini-3.1-pro-thinking` | 3.1 Pro 开扩展思考，**要配 cookie** |
-| `gemini-3.8-flash-thinking` | 3.8 Flash 开扩展思考，**要付费号 cookie**（`gemini-3.7-flash-thinking` 为别名）|
+| `gemini-4-hydrogen-thinking` | 4 Hydrogen 开扩展思考，需要有该模型权限的登录账号 cookie |
 | `gemini-4-argon-thinking` | 4 Argon 开扩展思考（上游叫 High 档），带 `reasoning_content`，**要付费/Ultra 号 cookie** |
 | `gemini-4-argon-thinking-medium` | 4 Argon 的中等思考档（上游 Medium，思考在服务端内部完成、不带 `reasoning_content`），**要付费/Ultra 号 cookie** |
 | `gemini-image` | 生图（Nano Banana），产物 base64，**要配 cookie** |
@@ -479,7 +489,7 @@ curl http://127.0.0.1:8083/v1/chat/completions \
 | 自动删会话（`auto_delete_conversation`） | 默认关。开启后每次出完结果自动删掉 gemini.google.com 上留下的这条会话，免得登录账号里堆一堆。只登录态生效，异步 best-effort、删失败不影响响应。 |
 | 临时对话（`temporary_chat`） | 默认关。开启后走 Gemini 网页端原生「临时对话」：会话压根不进账号的会话列表、不用于模型训练，比「自动删会话」更干净，还省掉那次删除请求。只登录态有意义；开了「服务端多轮续接」时自动不生效（临时对话不留列表，多轮要靠服务端留会话）。 |
 | 生图下载原图/放大（`image_upscale`） | 默认关。开启后照网页「下载」按钮取生成的图：Ultra 号放大到宽高各 2 倍，普通号拿到未重新压缩的原始文件。每张图多一次请求；取不到就退回默认那张。见上文「生图 / 音乐」。 |
-| 匿名优先（`anon_first`） | 默认关。开启后不需要登录态能力的请求（纯文本、非思考、无工具、不带图）走匿名、不占用 cookie 账号，省账号额度；用到 3.1 Pro / 3.8 Flash / 扩展思考 / 生图 / 传文件这些才挑号。关掉则只要池里有号就一律用号。 |
+| 匿名优先（`anon_first`） | 默认关。开启后不需要登录态能力的请求（纯文本、非思考、无工具、不带图）走匿名、不占用 cookie 账号，省账号额度；用到 3.1 Pro / 4 Hydrogen / 扩展思考 / 生图 / 传文件这些才挑号。关掉则只要池里有号就一律用号。 |
 | 严格模型校验（`strict_model`） | 默认关。账号某一档额度用完时，上游不报错，而是静默换成更弱的模型照样回 200。开启后，服务端自报的模型跟请求的不一致就不把降级回答当成功：换下一个号重试，全池都被降级就回 `429 insufficient_quota`（`code: model_downgraded`，带 `Retry-After`）。流式在吐出第一个字之前就判断，不会先吐一半再报错。媒体模型（生图/音乐/视频/画布）不参与判断。 |
 | 降级冷却（`strict_model_cooldown_min`） | 配合严格模型校验：被降级的号在这个模型上歇多久再用，默认 300 分钟（网页端用量按 5 小时窗口算）。0 = 不记，每次请求都重新试。 |
 | 重试次数 / 重试间隔 / 上游超时 | |
@@ -818,7 +828,8 @@ Docker 用默认 bridge 网络时上游可能返回空内容（Google 拒绝某�
 
 匿名（不挂 cookie）：`gemini-3.6-flash`、`gemini-3.5-flash-lite`，含联网搜索。
 挂免费账号 cookie：额外解锁 `gemini-3.1-pro`、3.6 Flash / 3.5 Flash-Lite / 3.1 Pro 的思考版（`-thinking`）、读图 / 读视频、生图、音乐、画布。
-付费账号才有：`gemini-3.8-flash`、`gemini-4-argon`（及其 `-thinking`，免费号都会被降级成 3.5 Flash-Lite）和生视频（`gemini-video` / `/v1/videos`）。
+`gemini-4-hydrogen` 及其思考版需要账号具有对应模型权限。
+付费账号才有：`gemini-4-argon`（及其 `-thinking`，免费号都会被降级成 3.5 Flash-Lite）和生视频（`gemini-video` / `/v1/videos`）。
 
 ### 为什么每发一条消息，gemini.google.com 里就多出一个会话？
 
@@ -832,10 +843,10 @@ Docker 用默认 bridge 网络时上游可能返回空内容（Google 拒绝某�
 agent 工具一次塞几万字系统提示和历史时容易答非所问、看起来变笨——这是网页端模型的先天限制，不是接入方式的问题。
 Function calling 是 prompt 级实现，模型不一定每次都按格式返回。
 
-### 有 gemini-3.8-flash 吗？
+### 有 gemini-4-hydrogen 吗？
 
-有（`gemini-3.8-flash` 与 `gemini-3.8-flash-thinking`），需要付费 Gemini 账号；免费号请求它会被服务端降级成 3.5 Flash-Lite。
-`gemini-3.7-flash` 作为别名保留，老客户端不受影响。
+有（`gemini-4-hydrogen` 与 `gemini-4-hydrogen-thinking`），需要有该模型权限的登录账号 cookie。严格模型校验按上游自报的 `4 Hydrogen` 判断，其他模型仍会被拒绝。
+原 `gemini-3.7-flash` / `gemini-3.8-flash` 及其思考版已移除，请将客户端模型名改为 Hydrogen 对应名称。
 
 ### 能用 Gemini 4 Argon 吗？怎么用？
 

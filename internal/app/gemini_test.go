@@ -16,6 +16,8 @@ func TestModelHeader(t *testing.T) {
 		{"gemini-3.6-flash", hexFlash36},
 		{"gemini-3.5-flash-lite", hexFlashLite},
 		{"gemini-3.1-pro", hexPro31},
+		{"gemini-4-hydrogen", hexHydrogen4},
+		{"gemini-4-hydrogen-thinking", hexHydrogen4},
 	}
 	for _, c := range cases {
 		name, mc, err := resolveModel(c.name)
@@ -45,13 +47,15 @@ func TestModelHeader(t *testing.T) {
 	}
 	// 已移除的旧别名必须明确报错，不能悄悄回落到 3.6 Flash
 	for _, gone := range []string{"gemini-3.5-flash", "gemini-3.5-flash-thinking",
-		"gemini-3.5-flash-thinking-lite", "gemini-auto", "gemini-flash-lite"} {
+		"gemini-3.5-flash-thinking-lite", "gemini-auto", "gemini-flash-lite",
+		"gemini-3.7-flash", "gemini-3.7-flash-thinking",
+		"gemini-3.8-flash", "gemini-3.8-flash-thinking"} {
 		if _, _, err := resolveModel(gone); err == nil {
 			t.Errorf("已移除的别名 %s 应该报错", gone)
 		}
 	}
 	// 守的是「不许冒出假模型」：thinking 版复用同样的 hex，所以看**去重后的 hex 数**，
-	// 不是条目数。服务端清单（otAQ7b）里 3.6/3.5-lite/3.1-pro/3.8-flash + 4 Argon（#35）= 5 个。
+	// 不是条目数。服务端清单（otAQ7b）里 3.6/3.5-lite/3.1-pro/4-hydrogen + 4 Argon（#35）= 5 个。
 	hexes := map[string]bool{}
 	for _, m := range Models {
 		hexes[m.HexID] = true
@@ -60,7 +64,7 @@ func TestModelHeader(t *testing.T) {
 		t.Errorf("只应存在 5 个真模型 hex, got %d", len(hexes))
 	}
 	// 反过来：每个真 hex 都应该有一个 thinking 版
-	for _, base := range []string{hexFlash36, hexFlashLite, hexPro31, hexFlash38, hexArgon4} {
+	for _, base := range []string{hexFlash36, hexFlashLite, hexPro31, hexHydrogen4, hexArgon4} {
 		found := false
 		for _, m := range Models {
 			if m.HexID == base && m.Thinking {

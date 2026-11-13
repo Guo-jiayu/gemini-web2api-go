@@ -75,6 +75,7 @@ func Run() {
 
 	// boot DB and load proxy pool
 	getDB()
+	initModelCatalog()
 	initRuntimeConfig() // 面板改过的运行时配置盖在启动配置之上
 	loadProxies()
 	seedProxiesFromConfig() // --proxy / 遗留静态代理并进代理池
@@ -149,6 +150,8 @@ func Run() {
 		mux.HandleFunc("/admin/api/apikey", requireAuth(handleAdminAPIKey))
 		mux.HandleFunc("/admin/api/usage", requireAuth(handleAdminUsage))
 		mux.HandleFunc("/admin/api/config", requireAuth(handleAdminConfig))
+		mux.HandleFunc("/admin/api/models", requireAuth(handleAdminModels))
+		mux.HandleFunc("/admin/api/models/discover", requireAuth(handleAdminDiscoverModels))
 		mux.HandleFunc("/admin/api/cookies", requireAuth(handleAdminCookies))
 		mux.HandleFunc("/admin/api/cookies/", requireAuth(handleAdminCookieItem))
 		mux.HandleFunc("/admin/api/test", requireAuth(handleAdminTest))

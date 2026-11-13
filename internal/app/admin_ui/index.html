@@ -355,6 +355,7 @@
                    display: flex; align-items: center; justify-content: center; z-index: 50; }
   .modal { background: var(--card); border-radius: 28px; padding: 26px 28px;
            width: min(460px,92vw); box-shadow: 0 8px 32px rgba(60,64,67,.24); }
+  .model-editor { max-height: calc(100dvh - 32px); overflow-y: auto; }
   .modal h3 { font-size: 17px; font-weight: 400; margin-bottom: 8px; }
   .modal-body { margin: 14px 0 18px; }
   .modal-err { color: var(--fail); font-size: 12.5px; margin-bottom: 10px; }
@@ -393,7 +394,8 @@
     .sidebar.collapsed nav button { padding: 10px 16px; }
     .sidebar.collapsed .nav-label { display: inline; }
     .side-foot { display: none; }
-    .topbar { padding: 0 14px; }
+    .topbar { padding: 8px 14px; height: auto; min-height: 60px; flex-wrap: wrap; gap: 6px; }
+    .page-title { white-space: nowrap; }
     main { padding: 4px 14px 28px; }
     .grid-2 { grid-template-columns: 1fr; }
     .chart-wrap { height: 210px; }
@@ -1801,6 +1803,7 @@ function refreshPage() { return switchPage(currentPage, true); }
 
 // 侧栏图标（Material Symbols 风格的简化路径，内联避免外部依赖）
 const ICONS = {
+  models: '<path d="M3 3h8v8H3zm10 0h8v8h-8zM3 13h8v8H3zm10 0h8v8h-8z"/>',
   dashboard: '<path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"/>',
   requests: '<path d="M7 5h14v2H7V5zm0 6h14v2H7v-2zm0 6h14v2H7v-2zM3 4.5a1.5 1.5 0 113 0 1.5 1.5 0 01-3 0zm0 6a1.5 1.5 0 113 0 1.5 1.5 0 01-3 0zm0 6a1.5 1.5 0 113 0 1.5 1.5 0 01-3 0z"/>',
   proxies: '<path d="M12 2a2.5 2.5 0 011 4.79V9h4a2 2 0 012 2v1.21a2.5 2.5 0 11-2 0V11h-4v1.21a2.5 2.5 0 11-2 0V11H7v1.21a2.5 2.5 0 11-2 0V11a2 2 0 012-2h4V6.79A2.5 2.5 0 0112 2z"/>',
@@ -1817,10 +1820,12 @@ const NAV = [
   ['requests', '请求记录'],
   ['proxies', '代理池'],
   ['cookies', 'Cookie 池'],
+  ['models', '模型管理'],
   ['settings', '设置'],
   ['about', '关于'],
 ];
 const PAGE_TITLES = {
+  models: '模型管理',
   dashboard: '概览', requests: '请求记录', proxies: '代理池', cookies: 'Cookie 池', settings: '设置',
   about: '关于',
 };
@@ -2763,6 +2768,9 @@ function toggleLang() {
   }
 }
 
+</script>
+<script src="models.js"></script>
+<script>
 // boot — try fetching stats; if 401, login page
 (async () => {
   const r = await fetch('api/stats?hours=1', { credentials: 'include' });

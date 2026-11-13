@@ -119,7 +119,7 @@ func handleCreateVideo(w http.ResponseWriter, r *http.Request) {
 	}
 	// 校验模型确实是视频模型（查基础配置，不用 resolveModel —— 它无 cookie 时对登录态模型
 	// 直接返「需要 cookie」错，那个错该留给 job 里报，别在这一步糊成「不是视频模型」）。
-	if base, ok := Models[model]; !ok || base.Tool != toolVideo {
+	if base, ok := configuredModels()[model]; !ok || base.Tool != toolVideo {
 		writeJSON(w, 400, map[string]any{"error": map[string]string{
 			"message": "model must be a video model (gemini-video)", "type": "invalid_request_error"}})
 		return

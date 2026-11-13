@@ -24,12 +24,9 @@ const (
 	hexFlash36   = "fbb127bbb056c959" // 3.6 Flash
 	hexFlashLite = "cf41b0e0dd7d53e5" // 3.5 Flash-Lite
 	hexPro31     = "9d8ca3786ebdfbea" // 3.1 Pro
-	// 3.7 Flash：按账号灰度放出。hex 是 otAQ7b 里 3.7 条目的**主 hex**（第一个元素），
-	// 两个独立已灰度账号的清单里都是它、且有 3.7 号的用户实测发它回报 "3.7 Flash"
-	// （issue #4 / PR #11）。注意别用 compat 列表里那个 797f3d0293f288ad —— 那是
-	// "当前 Flash" 泛指针，老批次号发它拿到的是 3.6，会冒充 3.7。老批次号发这个主 hex
-	// 会干净降级成 3.5 Flash-Lite（跟 3.1 Pro 一样），所以 gate 成要 cookie。
-	hexFlash38 = "56fdd199312815e2" // 3.8 Flash（原记 3.7；Google 把这个 hex 原地升成 3.8，HAR 响应帧显示名已是 "3.8 Flash"）
+	// 2026-11-13：原 3.8 Flash 路由现在自报 4 Hydrogen。
+	// 保持原 hex / Mode=1，只更新公开名称和严格校验的上游名称。
+	hexHydrogen4 = "56fdd199312815e2"
 	// 4 Argon（#35）：otAQ7b 清单里主 hex 95a4c0abcba24364、短名 Argon、代号 Argon4p0、
 	// 显示名 "4 Argon"。付费/Ultra 号专属。实测**真正选中它靠的是 MODE=8（header 下标 14 /
 	// inner[79]），不是 hex**：借来的 Ultra 号上，hex=Argon 配 mode=1 回报 "3.8 Flash"（mode 1
@@ -62,6 +59,8 @@ const (
 
 // ModelConfig holds the server-side model id plus the legacy MODE_CATEGORY value.
 type ModelConfig struct {
+	RequiresLogin  bool // 动态模型可显式要求登录，不依赖已知 hex。
+	loginPolicySet bool
 	// HexID 走 x-goog-ext-525001261-jspb header，是服务端唯一认的模型开关。
 	// 实测：不发这个 header 时 inner[79] 取 1..6 全部落到 3.5 Flash-Lite；
 	// header 写 3.6 而 inner[79] 写 6 时拿到的是 3.6 —— header 压过 inner[79]。
@@ -123,11 +122,8 @@ var Models = map[string]ModelConfig{
 	"gemini-3.6-flash":      {HexID: hexFlash36, Mode: 1, Upstream: "3.6 Flash", Desc: "Latest all-around model"},
 	"gemini-3.5-flash-lite": {HexID: hexFlashLite, Mode: 6, Upstream: "3.5 Flash-Lite", Desc: "Fastest, lightweight"},
 	"gemini-3.1-pro":        {HexID: hexPro31, Mode: 3, Upstream: "3.1 Pro", Desc: "Most capable; needs a signed-in cookie (downgraded to Flash-Lite without one)"},
-	// 3.8 Flash：Google 把原 3.7 那个 hex 原地升级了（同 hex，服务端显示名从 3.7 变 3.8）。
-	// 实测是**付费号专属**（不是灰度）：只有付费 Gemini 账号有，免费号降级成 3.5 Flash-Lite。
-	// gemini-3.7-flash 保留为别名（同 hex）。
-	"gemini-3.8-flash": {HexID: hexFlash38, Mode: 1, Upstream: "3.8 Flash", Desc: "3.8 Flash; needs a signed-in PAID Google account (free accounts get downgraded to 3.5 Flash-Lite)"},
-	"gemini-3.7-flash": {HexID: hexFlash38, Mode: 1, Upstream: "3.8 Flash", Desc: "alias of gemini-3.8-flash (same hex; Google renamed 3.7→3.8)"},
+	// Hydrogen 取代旧的 3.8 Flash；旧的 3.7/3.8 名称不再列出。
+	"gemini-4-hydrogen": {HexID: hexHydrogen4, Mode: 1, Upstream: "4 Hydrogen", Desc: "4 Hydrogen; needs a signed-in Google account with access to this model"},
 	// 4 Argon（#35）：Mode=8 是真正的选择开关（见 hexArgon4 注释）。付费/Ultra 号专属，
 	// 免费号发它会被静默降级成 3.5 Flash-Lite，所以 gate 成要 cookie（modelNeedsLogin）。
 	"gemini-4-argon": {HexID: hexArgon4, Mode: 8, Upstream: "4 Argon", Desc: "4 Argon (complex tasks); needs a signed-in PAID/Ultra Google account (free accounts get downgraded to 3.5 Flash-Lite)"},
@@ -137,8 +133,7 @@ var Models = map[string]ModelConfig{
 	"gemini-3.6-flash-thinking":      {HexID: hexFlash36, Mode: 1, Thinking: true, Upstream: "3.6 Flash", Desc: "3.6 Flash with extended thinking; needs a signed-in cookie"},
 	"gemini-3.5-flash-lite-thinking": {HexID: hexFlashLite, Mode: 6, Thinking: true, Upstream: "3.5 Flash-Lite", Desc: "3.5 Flash-Lite with extended thinking; needs a signed-in cookie"},
 	"gemini-3.1-pro-thinking":        {HexID: hexPro31, Mode: 3, Thinking: true, Upstream: "3.1 Pro", Desc: "3.1 Pro with extended thinking; needs a signed-in cookie"},
-	"gemini-3.8-flash-thinking":      {HexID: hexFlash38, Mode: 1, Thinking: true, Upstream: "3.8 Flash", Desc: "3.8 Flash with extended thinking; needs a signed-in cookie"},
-	"gemini-3.7-flash-thinking":      {HexID: hexFlash38, Mode: 1, Thinking: true, Upstream: "3.8 Flash", Desc: "alias of gemini-3.8-flash-thinking"},
+	"gemini-4-hydrogen-thinking":     {HexID: hexHydrogen4, Mode: 1, Thinking: true, Upstream: "4 Hydrogen", Desc: "4 Hydrogen with extended thinking; needs a signed-in cookie"},
 	// 4 Argon + 扩展思考：Mode=8（选 Argon）+ inner[80]=2（上游现在把这档叫 "High"）。
 	// 实测回报 "4 Argon High" 且带思考链（硬题 985 字符，走既有 [4][0][37][0][0] 路径，
 	// 无需改抽取代码）→ 映射成 reasoning_content。付费/Ultra 专属。
@@ -163,15 +158,16 @@ func hasCookie() bool {
 }
 
 // modelNeedsLogin 判断一个模型是否必须登录态才真正生效。匿名请求这批会被服务端
-// 静默降级：3.1 Pro / 3.8 Flash → 3.5 Flash-Lite；思考链消失；媒体工具变成一句
+// 静默降级：3.1 Pro / 4 Hydrogen → 3.5 Flash-Lite；思考链消失；媒体工具变成一句
 // "Are you signed in?" 文本。是「没 cookie 时排除哪些模型」和「#20 匿名优先要不要
 // 占一个 cookie 账号」共用的单一判据。
 //
-// 按 HexID + Thinking + Tool 判，跟旧的按模型名（3.1-pro/3.8-flash/3.7-flash）判
-// 逐模型核对等价：那三个正名的 HexID 就是 hexPro31 / hexFlash38，其余登录模型都被
-// Thinking 或 Tool 覆盖。
+// 按模型路由和思考/工具选项判定，不依赖公开模型名称。
 func modelNeedsLogin(mc ModelConfig) bool {
-	return mc.HexID == hexPro31 || mc.HexID == hexFlash38 || mc.HexID == hexArgon4 || mc.Thinking || mc.ThinkWire > 0 || mc.Tool > 0
+	if mc.loginPolicySet {
+		return mc.RequiresLogin || mc.Thinking || mc.ThinkWire > 0 || mc.Tool > 0
+	}
+	return mc.RequiresLogin || mc.HexID == hexPro31 || mc.HexID == hexHydrogen4 || mc.HexID == hexArgon4 || mc.Thinking || mc.ThinkWire > 0 || mc.Tool > 0
 }
 
 // anonFirstEligible 判断「匿名优先」开关下这次请求能不能走匿名（不占 cookie 账号）：
@@ -206,11 +202,12 @@ func useWebChannelForModel(c RuntimeConfig, mc ModelConfig) bool {
 // 登录也只能拿到 3.6 Flash 扩展」是在缺 XSRF token 的条件下测的，那时候带
 // cookie 的请求根本发不出去（见 xsrf.go）。
 func availableModels() map[string]ModelConfig {
+	models := configuredModels()
 	if hasCookie() {
-		return Models
+		return models
 	}
-	out := make(map[string]ModelConfig, len(Models))
-	for k, v := range Models {
+	out := make(map[string]ModelConfig, len(models))
+	for k, v := range models {
 		if modelNeedsLogin(v) {
 			continue
 		}
@@ -231,7 +228,7 @@ func resolveModel(modelName string) (string, ModelConfig, error) {
 	}
 	mc, ok := availableModels()[modelName]
 	if !ok {
-		if full, exists := Models[modelName]; exists && !hasCookie() {
+		if full, exists := configuredModels()[modelName]; exists && !hasCookie() {
 			downgrade := "are silently downgraded to 3.5 Flash-Lite"
 			if full.Tool > 0 {
 				downgrade = "are silently downgraded to a plain \"Are you signed in?\" text reply"
