@@ -3,6 +3,7 @@
 Set WEB2API_TEST_ADMIN in the process environment, then pass --base-url and
 --out. Run beside the target service so the loopback fileData fixture is reachable.
 Real generation consumes account quota. Reports contain only synthetic test data.
+For Docker, bind the fixture to the project's bridge gateway with --fixture-host.
 """
 import argparse
 import base64
@@ -21,6 +22,7 @@ def main():
     parser.add_argument('--base-url', default=os.getenv('WEB2API_TEST_BASE', 'http://127.0.0.1:8083'))
     parser.add_argument('--out', default=os.getenv('WEB2API_TEST_OUT'), required=not os.getenv('WEB2API_TEST_OUT'))
     parser.add_argument('--reference', default=os.getenv('WEB2API_TEST_REFERENCE', str(Path(__file__).parent / 'testdata/gemini-reference.png')))
+    parser.add_argument('--fixture-host', default=os.getenv('WEB2API_TEST_FIXTURE_HOST', '127.0.0.1'))
     args = parser.parse_args()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -56,7 +58,7 @@ def main():
         def log_message(self, *unused):
             pass
 
-    fixture_server = HTTPServer(('127.0.0.1', 0), FixtureHandler)
+    fixture_server = HTTPServer((args.fixture_host, 0), FixtureHandler)
     fixture_thread = threading.Thread(target=fixture_server.serve_forever, daemon=True)
     fixture_thread.start()
     results = []
@@ -148,7 +150,7 @@ def main():
             request(name, text_model + action, {'contents': [{'role': 'user', 'parts': [{'text': 'Reply exactly GEMINI_NATIVE_OK'}]}]}, stream=stream, marker=['GEMINI_NATIVE_OK'])
         request('vision-inline', text_model + ':generateContent', {'contents': [{'role': 'user', 'parts': [inline, vision_prompt]}]}, marker=['red', 'square', 'blue', 'circle'])
         request('vision-model-history', text_model + ':generateContent', {'contents': [{'role': 'model', 'parts': [inline]}, {'role': 'user', 'parts': [vision_prompt]}]}, marker=['red', 'square', 'blue', 'circle'])
-        request('vision-file-redirect', text_model + ':generateContent', {'contents': [{'parts': [{'fileData': {'mimeType': 'image/png', 'fileUri': 'http://127.0.0.1:' + str(fixture_server.server_port) + '/redirect'}}, vision_prompt]}]}, marker=['red', 'square', 'blue', 'circle'])
+        request('vision-file-redirect', text_model + ':generateContent', {'contents': [{'parts': [{'fileData': {'mimeType': 'image/png', 'fileUri': 'http://' + args.fixture_host + ':' + str(fixture_server.server_port) + '/redirect'}}, vision_prompt]}]}, marker=['red', 'square', 'blue', 'circle'])
         config = {'responseModalities': ['IMAGE'], 'imageConfig': {'aspectRatio': '1:1', 'imageSize': '1K'}}
         generated = request('image-json', image_model + ':generateContent', {'contents': [{'parts': [{'text': 'Generate a studio product photo of a red toy car on a white table, centered, no text.'}]}], 'generationConfig': config}, image_count=1, image_only=True)
         request('image-sse', image_model + ':streamGenerateContent?alt=sse', {'contents': [{'parts': [{'text': 'Generate a photo of a blue ceramic cup on a white table, centered, no text.'}]}], 'generationConfig': {'responseModalities': ['TEXT', 'IMAGE'], 'imageConfig': {'aspectRatio': '1:1', 'imageSize': '1K'}}}, stream=True, image_count=1)

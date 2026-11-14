@@ -51,7 +51,7 @@ new-api 的 Gemini 渠道从服务根地址追加 `/v1beta/models` 获取模型�
 
 流式地址为 `:streamGenerateContent?alt=sse`，每个 `data:` 事件是 Gemini 响应，末帧带 `finishReason: "STOP"` 和 `usageMetadata`，没有 OpenAI 的 `[DONE]`。不带 `alt=sse` 则返回逐块写出的 JSON 数组。图片在完整生成后发出，不是渐进像素流。
 
-`scripts/test-gemini-newapi.py` 提供有界真实验收：模型列表、鉴权错误、文本 JSON/SSE/JSON 数组、inlineData/fileData 识图、model 图片历史、生成和多轮编辑。使用独立输出目录，管理员令牌只从进程环境变量 `WEB2API_TEST_ADMIN` 读取；调用会消耗上游配额，不修改运行配置。脚本须与被测服务在同一主机执行，供 fileData 测试使用的临时 HTTP 服务只监听回环地址。
+`scripts/test-gemini-newapi.py` 提供有界真实验收：模型列表、鉴权错误、文本 JSON/SSE/JSON 数组、inlineData/fileData 识图、model 图片历史、生成和多轮编辑。使用独立输出目录，管理员令牌只从进程环境变量 `WEB2API_TEST_ADMIN` 读取；调用会消耗上游配额，不修改运行配置。脚本须与被测服务在同一主机执行；临时参考图 HTTP 服务默认只监听回环地址。被测服务在 Docker 中时，用 `--fixture-host` 指定本项目 Docker 网桥网关地址，使容器能访问测试图片，不必开放公网端口。
 
 ### OpenAI 图片接口
 
