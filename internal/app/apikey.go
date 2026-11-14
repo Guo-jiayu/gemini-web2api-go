@@ -126,6 +126,10 @@ func requireAPIKey(next http.HandlerFunc) http.HandlerFunc {
 			got = strings.TrimSpace(r.URL.Query().Get("key"))
 		}
 		if got == "" || subtle.ConstantTimeCompare([]byte(got), []byte(key)) != 1 {
+			if r.URL.Path == "/v1beta/models" || strings.HasPrefix(r.URL.Path, "/v1beta/models/") {
+				writeGeminiError(w, http.StatusUnauthorized, "Invalid API key. Set x-goog-api-key or Authorization: Bearer <key>.")
+				return
+			}
 			writeJSON(w, 401, map[string]interface{}{
 				"error": map[string]string{
 					"message": "Invalid API key. Set Authorization: Bearer <key>, x-api-key or x-goog-api-key header.",

@@ -2,7 +2,7 @@
 
 2026-11-13 复核与优化见 [文本、生图兼容及性能报告](newapi-flash-image-audit-20261113.md)。当前实测旧 `gemini-3.6-flash` 返回了不同的上游型号，被严格校验拒绝；不能仅依据历史测试判断 Flash 仍可用。
 
-适配版本：`4.27.1-newapi`。对照源码：[`QQhuxuhui/new-api@8faf1d45`](https://github.com/QQhuxuhui/new-api/tree/8faf1d45e8c101974dc7483324d3d91c8a462ffe)。仅修改 web2api，new-api 无需改源码。
+适配版本：`4.27.2-gemini-newapi`。对照源码：[`QQhuxuhui/new-api@8faf1d45`](https://github.com/QQhuxuhui/new-api/tree/8faf1d45e8c101974dc7483324d3d91c8a462ffe)。仅修改 web2api，new-api 无需改源码。
 
 ## 渠道选择
 
@@ -26,6 +26,34 @@
 - new-api 的额度/价格由管理者按实际服务配置；web2api 不提供 Google 官方 token 或图片费用。图片专用响应不伪造图像 token usage，应按图片数量设置价格。
 
 ## 图片生成
+
+### Gemini 原生渠道
+
+new-api 的 Gemini 渠道从服务根地址追加 `/v1beta/models` 获取模型；模型名称来自动态目录，停用的条目不会返回。请求携带 `x-goog-api-key`。模型列表返回 `models[].name`（带 `models/` 前缀），不返回 OpenAI 的 `data[]`。鉴权错误也使用 Gemini 的数字 `error.code` 和 `error.status`。
+
+原生生图请求为 `POST /v1beta/models/gemini-image:generateContent`：
+
+```json
+{
+  "contents": [{"role": "user", "parts": [{"text": "生成一张蓝色茶壶的产品照片"}]}],
+  "generationConfig": {
+    "responseModalities": ["TEXT", "IMAGE"],
+    "imageConfig": {"aspectRatio": "1:1", "imageSize": "1K"}
+  }
+}
+```
+
+图片在 `candidates[].content.parts[].inlineData` 中，包含 `mimeType` 和纯 Base64 `data`。`responseModalities: ["IMAGE"]` 只返回图片；要求图片输出时须选择 `gemini-image`，不会把文本模型静默改成生图模型。不支持的输出模态返回 400。
+
+图片输入使用 `{"inlineData":{"mimeType":"image/png","data":"真实Base64"}}`，也支持 `{"fileData":{"mimeType":"image/png","fileUri":"https://..."}}` 的 HTTP(S) 图片链接及有限次重定向。Google Files API 的 `files/...` URI 不支持；请传图片字节。
+
+多轮编辑可把上次响应的 `content`（`role: "model"`，含图片 `parts`）放回 `contents`，再追加新的 user 指令。model 历史中的图片会继续作为参考图上传，不会只保留说明文字。
+
+流式地址为 `:streamGenerateContent?alt=sse`，每个 `data:` 事件是 Gemini 响应，末帧带 `finishReason: "STOP"` 和 `usageMetadata`，没有 OpenAI 的 `[DONE]`。不带 `alt=sse` 则返回逐块写出的 JSON 数组。图片在完整生成后发出，不是渐进像素流。
+
+`scripts/test-gemini-newapi.py` 提供有界真实验收：模型列表、鉴权错误、文本 JSON/SSE/JSON 数组、inlineData/fileData 识图、model 图片历史、生成和多轮编辑。使用独立输出目录，管理员令牌只从进程环境变量 `WEB2API_TEST_ADMIN` 读取；调用会消耗上游配额，不修改运行配置。脚本须与被测服务在同一主机执行，供 fileData 测试使用的临时 HTTP 服务只监听回环地址。
+
+### OpenAI 图片接口
 
 向 new-api 或 web2api 的 `/v1/images/generations` 发送：
 

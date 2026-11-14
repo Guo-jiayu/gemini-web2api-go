@@ -43,9 +43,10 @@ type geminiAPIRequest struct {
 		} `json:"functionCallingConfig"`
 	} `json:"toolConfig"`
 	GenerationConfig struct {
-		ImageConfig    map[string]interface{} `json:"imageConfig"`
-		CandidateCount int                    `json:"candidateCount"`
-		ThinkingConfig struct {
+		ResponseModalities []string               `json:"responseModalities"`
+		ImageConfig        map[string]interface{} `json:"imageConfig"`
+		CandidateCount     int                    `json:"candidateCount"`
+		ThinkingConfig     struct {
 			IncludeThoughts bool `json:"includeThoughts"`
 		} `json:"thinkingConfig"`
 	} `json:"generationConfig"`
@@ -141,12 +142,22 @@ func geminiAPIToMessages(req *geminiAPIRequest) ([]map[string]interface{}, []map
 			}
 		}
 		text := strings.Join(texts, "\n")
+		var content interface{} = text
+		if len(media) > 0 {
+			parts := media
+			if text != "" {
+				parts = append([]interface{}{map[string]interface{}{"type": "text", "text": text}}, media...)
+			}
+			content = parts
+		}
 
 		if c.Role == "model" {
-			if text == "" && len(calls) == 0 {
+			if text == "" && len(calls) == 0 && len(media) == 0 {
 				continue
 			}
-			m := map[string]interface{}{"role": "assistant", "content": text}
+			// A generated image can be sent back as model history for the next
+			// edit. Keep it available to collectImages just like user media.
+			m := map[string]interface{}{"role": "assistant", "content": content}
 			if len(calls) > 0 {
 				m["tool_calls"] = calls
 			}
@@ -154,14 +165,8 @@ func geminiAPIToMessages(req *geminiAPIRequest) ([]map[string]interface{}, []map
 			continue
 		}
 		// user（以及旧写法里放 functionResponse 的 "function" 角色）。
-		if len(media) > 0 {
-			content := media
-			if text != "" {
-				content = append([]interface{}{map[string]interface{}{"type": "text", "text": text}}, media...)
-			}
+		if len(media) > 0 || text != "" {
 			messages = append(messages, map[string]interface{}{"role": "user", "content": content})
-		} else if text != "" {
-			messages = append(messages, map[string]interface{}{"role": "user", "content": text})
 		}
 	}
 
@@ -467,6 +472,7 @@ type geminiCall struct {
 	images     []pendingUpload
 	prompt     string
 	latest     string
+	imageOnly  bool
 }
 
 func prepareGemini(w http.ResponseWriter, r *http.Request, model string) (*geminiCall, bool) {
@@ -477,6 +483,26 @@ func prepareGemini(w http.ResponseWriter, r *http.Request, model string) (*gemin
 	modelName, modelCfg, err := resolveModel(model)
 	if err != nil {
 		writeGeminiError(w, 400, err.Error())
+		return nil, false
+	}
+	textOutput, imageOutput := false, false
+	for _, modality := range req.GenerationConfig.ResponseModalities {
+		switch modality {
+		case "TEXT":
+			textOutput = true
+		case "IMAGE":
+			imageOutput = true
+		default:
+			writeGeminiError(w, 400, "unsupported response modality: "+modality)
+			return nil, false
+		}
+	}
+	if imageOutput && modelCfg.Tool != toolImage {
+		writeGeminiError(w, 400, "IMAGE output requires an image model such as gemini-image")
+		return nil, false
+	}
+	if len(req.GenerationConfig.ResponseModalities) > 0 && modelCfg.Tool == toolImage && !imageOutput {
+		writeGeminiError(w, 400, "an image model requires IMAGE in responseModalities")
 		return nil, false
 	}
 	if req.GenerationConfig.ImageConfig != nil {
@@ -505,7 +531,8 @@ func prepareGemini(w http.ResponseWriter, r *http.Request, model string) (*gemin
 		return nil, false
 	}
 	return &geminiCall{req: req, modelName: modelName, modelCfg: modelCfg, messages: messages,
-		tools: tools, toolChoice: toolChoice, images: images, prompt: prompt, latest: latest}, true
+		tools: tools, toolChoice: toolChoice, images: images, prompt: prompt, latest: latest,
+		imageOnly: imageOutput && !textOutput}, true
 }
 
 // run 调上游；多轮开关的分流跟 /v1/chat/completions 一致。
@@ -536,6 +563,9 @@ func handleGenerateContent(w http.ResponseWriter, r *http.Request, model string)
 	recordRequest("gemini.generateContent", g.modelName, g.prompt, text, res, 200, "", false)
 
 	t := newGeminiTurn(text, calls, res)
+	if g.imageOnly {
+		t.text, t.reasoning = "", ""
+	}
 	var parts []interface{}
 	// 思考摘要只在客户端要了（thinkingConfig.includeThoughts）时给，跟 Google 一致。
 	if t.reasoning != "" && g.req.GenerationConfig.ThinkingConfig.IncludeThoughts {
@@ -645,13 +675,16 @@ func handleStreamGenerateContent(w http.ResponseWriter, r *http.Request, model s
 	f, _ := w.(http.Flusher)
 	st := &geminiStream{w: w, flusher: f, sse: r.URL.Query().Get("alt") == "sse",
 		model: g.modelName, rid: randHex(16)}
-	includeThoughts := g.req.GenerationConfig.ThinkingConfig.IncludeThoughts
+	includeThoughts := g.req.GenerationConfig.ThinkingConfig.IncludeThoughts && !g.imageOnly
 
 	// 带工具时正文过围栏闸门，跟 OpenAI 两条路一样：围栏原文不能推给客户端。
 	var gate *toolFenceGate
 	onDelta := st.text
+	if g.imageOnly {
+		onDelta = func(string) {} // Do not leak descriptive text before the image.
+	}
 	if len(g.tools) > 0 {
-		gate = newToolFenceGate(st.text)
+		gate = newToolFenceGate(onDelta)
 		onDelta = gate.Push
 	}
 	var onReasoning func(string)
@@ -673,6 +706,9 @@ func handleStreamGenerateContent(w http.ResponseWriter, r *http.Request, model s
 	recordRequest("gemini.streamGenerateContent", g.modelName, g.prompt, text, res, 200, "", true)
 
 	t := newGeminiTurn(text, calls, res)
+	if g.imageOnly {
+		t.text, t.reasoning = "", ""
+	}
 	// 补发真流式没推到的尾巴：思考在前、正文在后，保持「先思考后回答」的顺序。
 	if includeThoughts && res != nil && t.reasoning != "" {
 		if rest := remainingOf(t.reasoning, res.EmittedReasoning); rest != "" {
